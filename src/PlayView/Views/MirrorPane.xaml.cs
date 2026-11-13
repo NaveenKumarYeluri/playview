@@ -17,7 +17,6 @@ public partial class MirrorPane : UserControl
     private string? _adb;
 
     private Process? _scrcpyProcess;
-    private Task<string>? _stderrTask;
     private IntPtr _scrcpyHwnd;
     private DispatcherTimer? _livenessTimer;
     private DispatcherTimer? _sizeTimer;
@@ -136,8 +135,8 @@ public partial class MirrorPane : UserControl
         }
         catch { /* process list unavailable — not fatal */ }
 
-        // Give adb a moment to release the device socket.
-        await Task.Delay(500);
+        // Free the phone-side server from any previous session.
+        await KillDeviceServerAsync();
     }
 
     private async void OnLaunch(object sender, RoutedEventArgs e)
@@ -174,73 +173,114 @@ public partial class MirrorPane : UserControl
         }
 
         LaunchBtn.IsEnabled = false;
-        StatusMessage = "Starting mirror on " + selected.Description + "…";
 
         // Ask scrcpy itself for a window sized to our pane (DPI-aware device pixels)
         // so it opens full-size from the start instead of being resized after launch.
         var pane = GetPanePixelSize();
-        var args = $"-s {selected.Serial} --window-title {WindowName} --window-borderless" +
-                   $" --window-width {pane.Width} --window-height {pane.Height}";
-        if (!string.IsNullOrWhiteSpace(ExtraArgsBox.Text)) args += " " + ExtraArgsBox.Text.Trim();
+        var baseArgs = $"-s {selected.Serial} --window-title {WindowName} --window-borderless" +
+                       $" --window-width {pane.Width} --window-height {pane.Height}";
+        if (!string.IsNullOrWhiteSpace(ExtraArgsBox.Text)) baseArgs += " " + ExtraArgsBox.Text.Trim();
 
-        try
+        string lastError = "";
+        const int maxAttempts = 3;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            _scrcpyProcess = Process.Start(new ProcessStartInfo(_scrcpy, args)
+            StatusMessage = attempt == 1
+                ? "Starting mirror on " + selected.Description + "…"
+                : $"Retrying ({attempt}/{maxAttempts}) — the previous session is still releasing the phone…";
+
+            Task<string>? stderrTask;
+            try
             {
-                UseShellExecute = false,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-            });
-            _stderrTask = _scrcpyProcess!.StandardError.ReadToEndAsync();
-            AppendMirrorLog($"launch: \"{_scrcpy}\" {args}");
-        }
-        catch (Exception ex)
-        {
-            StatusMessage = "Failed to start scrcpy: " + ex.Message;
-            LaunchBtn.IsEnabled = true;
-            return;
-        }
-
-        // Wait for scrcpy's window to appear, then embed it into this pane.
-        var deadline = DateTime.UtcNow.AddSeconds(30);
-        while (DateTime.UtcNow < deadline)
-        {
-            if (_scrcpyProcess.HasExited) break;
-
-            var hwnd = Native.FindWindowW(null, WindowName);
-            if (hwnd != IntPtr.Zero)
+                _scrcpyProcess = Process.Start(new ProcessStartInfo(_scrcpy, baseArgs)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                });
+                stderrTask = _scrcpyProcess!.StandardError.ReadToEndAsync();
+                AppendMirrorLog($"launch (attempt {attempt}): \"{_scrcpy}\" {baseArgs}");
+            }
+            catch (Exception ex)
             {
-                // Capture the phone screen aspect once, before any of our resizing.
-                if (Native.GetWindowRect(hwnd, out var wr) && wr.Right > wr.Left && wr.Bottom > wr.Top)
-                    _phoneAspect = (double)(wr.Right - wr.Left) / (wr.Bottom - wr.Top);
-
-                await EmbedMirrorAsync(hwnd);
+                StatusMessage = "Failed to start scrcpy: " + ex.Message;
+                AppendMirrorLog($"start failed: {ex.Message}");
                 LaunchBtn.IsEnabled = true;
                 return;
             }
 
-            await Task.Delay(250);
+            // Wait for scrcpy's window to appear, then embed it into this pane.
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (_scrcpyProcess.HasExited) break;
+
+                var hwnd = Native.FindWindowW(null, WindowName);
+                if (hwnd != IntPtr.Zero)
+                {
+                    // Capture the phone screen aspect once, before any of our resizing.
+                    if (Native.GetWindowRect(hwnd, out var wr) && wr.Right > wr.Left && wr.Bottom > wr.Top)
+                        _phoneAspect = (double)(wr.Right - wr.Left) / (wr.Bottom - wr.Top);
+
+                    await EmbedMirrorAsync(hwnd);
+                    LaunchBtn.IsEnabled = true;
+                    return;
+                }
+
+                await Task.Delay(250);
+            }
+
+            if (_scrcpyProcess.HasExited)
+            {
+                string output = "";
+                await Task.WhenAny(stderrTask, Task.Delay(1000));
+                if (stderrTask.Status == TaskStatus.RanToCompletion) output = stderrTask.Result;
+                lastError = output;
+
+                AppendMirrorLog($"exited on attempt {attempt} (code {_scrcpyProcess.ExitCode}): {output}");
+            }
+            else if (attempt >= maxAttempts)
+            {
+                try { _scrcpyProcess.Kill(true); } catch { /* already gone */ }
+                AppendMirrorLog("timed out waiting for the mirror window");
+            }
+            else
+            {
+                AppendMirrorLog($"no window appeared on attempt {attempt}; retrying");
+            }
+
+            if (attempt < maxAttempts)
+                await KillDeviceServerAsync();
         }
 
         LaunchBtn.IsEnabled = true;
 
-        if (_scrcpyProcess.HasExited)
+        if (_scrcpyProcess is { HasExited: true })
         {
-            string output = "";
-            if (_stderrTask != null)
-            {
-                await Task.WhenAny(_stderrTask, Task.Delay(1000));
-                if (_stderrTask.Status == TaskStatus.RanToCompletion) output = _stderrTask.Result;
-            }
-
             StatusMessage = "scrcpy exited before mirroring started." +
-                (string.IsNullOrWhiteSpace(output) ? "" : "\n\n" + TrimOutput(output));
-            AppendMirrorLog($"exited (code {_scrcpyProcess.ExitCode}): {output}");
+                (string.IsNullOrWhiteSpace(lastError) ? "" : "\n\n" + TrimOutput(lastError));
         }
         else
         {
             StatusMessage = "Timed out waiting for the mirror window. Try Launch again.";
         }
+    }
+
+    /// <summary>Kills a leftover scrcpy server on the phone so the device is free for a new session.</summary>
+    private async Task KillDeviceServerAsync()
+    {
+        if (_adb == null) return;
+        try
+        {
+            // [c] keeps the pattern from matching this very shell command.
+            await ScrcpyService.RunAdbAsync(_adb, "shell pkill -f scr[c]py");
+        }
+        catch
+        {
+            // Older Androids may lack pkill — the retry loop still gives the server time to exit.
+        }
+        await Task.Delay(800);
     }
 
     private async Task EmbedMirrorAsync(IntPtr hwnd)
@@ -422,7 +462,13 @@ public partial class MirrorPane : UserControl
 
     // ── Stop / teardown ──────────────────────────────────────────────────
 
-    private void OnStopMirror(object sender, RoutedEventArgs e) => StopMirror();
+    private async void OnStopMirror(object sender, RoutedEventArgs e)
+    {
+        StatusMessage = "Stopping mirror…";
+        StopMirrorCore();
+        await KillDeviceServerAsync();
+        ResetMirrorUi("Mirror stopped.");
+    }
 
     private void OnBackToSetup(object sender, RoutedEventArgs e)
     {
@@ -430,7 +476,7 @@ public partial class MirrorPane : UserControl
         MirrorSetup.Visibility = Visibility.Visible;
     }
 
-    private void StopMirror()
+    private void StopMirrorCore()
     {
         if (_scrcpyHwnd != IntPtr.Zero)
             Native.PostMessageW(_scrcpyHwnd, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
@@ -449,7 +495,6 @@ public partial class MirrorPane : UserControl
 
         _livenessTimer?.Stop();
         _sizeTimer?.Stop();
-        ResetMirrorUi("Mirror stopped.");
     }
 
     private void ResetMirrorUi(string message)
@@ -485,6 +530,8 @@ public partial class MirrorPane : UserControl
             if (_scrcpyProcess is { HasExited: false }) _scrcpyProcess.Kill(true);
         }
         catch { /* already gone */ }
+
+        _ = KillDeviceServerAsync();
     }
 
     // ── Path / Wi-Fi helpers ─────────────────────────────────────────────
