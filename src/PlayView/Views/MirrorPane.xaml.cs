@@ -501,7 +501,6 @@ public partial class MirrorPane : UserControl
     {
         _scrcpyHwnd = IntPtr.Zero;
         _scrcpyProcess = null;
-        _stderrTask = null;
         _phoneAspect = 0;
         _lastAppliedW = 0;
         _lastAppliedH = 0;
