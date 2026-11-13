@@ -73,6 +73,8 @@
                   Click="OnPlayPauseKey" ToolTip="Play / pause on phone"/>
           <Button Style="{StaticResource TransportButton}" Content="🔉" Click="OnVolDown" ToolTip="Volume down"/>
           <Button Style="{StaticResource TransportButton}" Content="🔊" Click="OnVolUp" ToolTip="Volume up"/>
+          <Button Style="{StaticResource TransportButton}" Content="◎" FontFamily="Segoe UI Symbol"
+                  Click="OnTapCenter" ToolTip="Tap centre of phone screen (shows controls / toggles play in many apps)"/>
           <Button Style="{StaticResource TransportButton}" Content="⬅" Click="OnBackKey" ToolTip="Back"/>
           <Button Style="{StaticResource TransportButton}" Content="⌂" FontFamily="Segoe UI Symbol"
                   Click="OnHomeKey" ToolTip="Home"/>

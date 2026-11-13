@@ -92,6 +92,26 @@ public partial class MirrorPane : UserControl
 
     // ── Launch + embed ───────────────────────────────────────────────────
 
+    private async Task CleanupStaleSessionAsync()
+    {
+        var staleWindow = Native.FindWindowW(null, WindowName);
+        if (staleWindow != IntPtr.Zero)
+            Native.PostMessageW(staleWindow, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+
+        try
+        {
+            foreach (var leftover in Process.GetProcessesByName("scrcpy"))
+            {
+                try { if (!leftover.HasExited) leftover.Kill(true); } catch { /* already gone */ }
+                leftover.Dispose();
+            }
+        }
+        catch { /* process list unavailable — not fatal */ }
+
+        // Give adb a moment to release the device socket.
+        await Task.Delay(500);
+    }
+
     private async void OnLaunch(object sender, RoutedEventArgs e)
     {
         if (_scrcpy == null || _adb == null)
@@ -105,6 +125,11 @@ public partial class MirrorPane : UserControl
             StatusText.Text = "A mirror session is already running — stop it first.";
             return;
         }
+
+        // Self-healing relaunch: close any leftover mirror window and kill stray
+        // scrcpy processes so a stopped session never blocks the next one.
+        StatusText.Text = "Preparing…";
+        await CleanupStaleSessionAsync();
 
         var selected = DeviceList.SelectedItem as ScrcpyDevice;
         if (selected == null && DeviceList.ItemsSource is List<ScrcpyDevice> devices && devices.Count == 1)
@@ -312,6 +337,44 @@ public partial class MirrorPane : UserControl
     private async void OnVolUp(object sender, RoutedEventArgs e) => await SendKeyEvent(24);
     private async void OnBackKey(object sender, RoutedEventArgs e) => await SendKeyEvent(4);
     private async void OnHomeKey(object sender, RoutedEventArgs e) => await SendKeyEvent(3);
+
+    private async void OnTapCenter(object sender, RoutedEventArgs e)
+    {
+        if (_adb == null || _scrcpyProcess is not { HasExited: false }) return;
+
+        try
+        {
+            var sizeOut = await ScrcpyService.RunAdbAsync(_adb, "shell wm size");
+            var match = System.Text.RegularExpressions.Regex.Match(sizeOut, @"(\d+)x(\d+)");
+            if (!match.Success) return;
+            var width = int.Parse(match.Groups[1].Value);
+            var height = int.Parse(match.Groups[2].Value);
+
+            // SurfaceOrientation: 0 = portrait, 1/3 = landscape
+            var orientOut = await ScrcpyService.RunAdbAsync(_adb, "shell dumpsys input | grep SurfaceOrientation");
+            var orientation = 0;
+            var orientMatch = System.Text.RegularExpressions.Regex.Match(orientOut, @"SurfaceOrientation\s*:\s*(\d)");
+            if (orientMatch.Success) orientation = int.Parse(orientMatch.Groups[1].Value);
+
+            int centerX, centerY;
+            if (orientation % 2 == 0)
+            {
+                centerX = width / 2;
+                centerY = height / 2;
+            }
+            else
+            {
+                centerX = height / 2;
+                centerY = width / 2;
+            }
+
+            await ScrcpyService.RunAdbAsync(_adb, $"shell input tap {centerX} {centerY}");
+        }
+        catch
+        {
+            // Phone busy or disconnected — the liveness watch will catch the exit.
+        }
+    }
 
     private async Task SendKeyEvent(int keyCode)
     {
