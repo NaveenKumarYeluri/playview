@@ -21,7 +21,7 @@ internal static class Native
     public const int SW_SHOW = 5;
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern IntPtr FindWindowW(string? className, string windowName);
+    public static extern IntPtr FindWindowW(string? className, string? windowName);
 
     [DllImport("user32.dll")]
     public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
