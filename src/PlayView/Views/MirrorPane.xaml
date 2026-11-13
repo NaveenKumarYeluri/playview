@@ -43,8 +43,8 @@
                    Margin="0,10,0,0" TextWrapping="Wrap"
                    Text="Looking for scrcpy…"/>
 
-        <CheckBox x:Name="SoftwareRenderCheck" Content="Software rendering (fixes ghosting / green-line artifacts)"
-                  IsChecked="True" Foreground="{StaticResource Brush.Text}" FontSize="12" Margin="0,14,0,0"/>
+        <CheckBox x:Name="SoftwareRenderCheck" Content="Software rendering (fallback only — enable if the picture shows artifacts)"
+                  IsChecked="False" Foreground="{StaticResource Brush.Text}" FontSize="12" Margin="0,14,0,0"/>
 
         <TextBlock Text="Extra scrcpy arguments (optional, e.g. --max-size 1280)" Foreground="{StaticResource Brush.SubText}"
                    FontSize="12" Margin="0,14,0,4"/>
