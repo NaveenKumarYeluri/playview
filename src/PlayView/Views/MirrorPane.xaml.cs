@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
@@ -41,6 +42,33 @@ public partial class MirrorPane : UserControl
         ScrcpyPathBox.Text = settings.ScrcpyPath;
     }
 
+    /// <summary>Updates the status line and scrolls it into view so failures are never missed.</summary>
+    private string StatusMessage
+    {
+        get => StatusText.Text;
+        set
+        {
+            StatusText.Text = value;
+            Dispatcher.InvokeAsync(
+                () => StatusText.BringIntoView(),
+                System.Windows.Threading.DispatcherPriority.Background);
+        }
+    }
+
+    private static void AppendMirrorLog(string line)
+    {
+        try
+        {
+            Directory.CreateDirectory(AppSettings.DataDir);
+            File.AppendAllText(Path.Combine(AppSettings.DataDir, "mirror.log"),
+                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {line}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Logging must never break the app.
+        }
+    }
+
     // ── Visibility plumbing ──────────────────────────────────────────────
 
     private void OnPaneVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
@@ -60,7 +88,7 @@ public partial class MirrorPane : UserControl
         _scrcpy = ScrcpyService.FindScrcpy(_settings.ScrcpyPath, AppContext.BaseDirectory);
         if (_scrcpy == null)
         {
-            StatusText.Text = "scrcpy not found. Install it (winget install scrcpy), " +
+            StatusMessage = "scrcpy not found. Install it (winget install scrcpy), " +
                               "or drop it into a tools folder next to PlayView.exe, or set the path below.";
             LaunchBtn.IsEnabled = false;
             RefreshBtn.IsEnabled = true;
@@ -72,18 +100,18 @@ public partial class MirrorPane : UserControl
         _adb = ScrcpyService.FindAdb(_scrcpy);
         if (_adb == null)
         {
-            StatusText.Text = "adb.exe not found next to scrcpy. Reinstall scrcpy (it bundles adb) or add adb to PATH.";
+            StatusMessage = "adb.exe not found next to scrcpy. Reinstall scrcpy (it bundles adb) or add adb to PATH.";
             LaunchBtn.IsEnabled = false;
             RefreshBtn.IsEnabled = true;
             return;
         }
 
-        StatusText.Text = "Checking devices…";
+        StatusMessage = "Checking devices…";
         var devices = await ScrcpyService.ListDevicesAsync(_adb);
         DeviceList.ItemsSource = devices;
 
         LaunchBtn.IsEnabled = devices.Count > 0;
-        StatusText.Text = devices.Count == 0
+        StatusMessage = devices.Count == 0
             ? "No devices found. Enable USB debugging on the phone, plug it in, and accept the debugging prompt."
             : $"{devices.Count} device(s) found. Select one and click Launch mirror.";
 
@@ -122,13 +150,13 @@ public partial class MirrorPane : UserControl
 
         if (_scrcpyProcess is { HasExited: false })
         {
-            StatusText.Text = "A mirror session is already running — stop it first.";
+            StatusMessage = "A mirror session is already running — stop it first.";
             return;
         }
 
         // Self-healing relaunch: close any leftover mirror window and kill stray
         // scrcpy processes so a stopped session never blocks the next one.
-        StatusText.Text = "Preparing…";
+        StatusMessage = "Preparing…";
         await CleanupStaleSessionAsync();
 
         var selected = DeviceList.SelectedItem as ScrcpyDevice;
@@ -136,17 +164,17 @@ public partial class MirrorPane : UserControl
             selected = devices[0];
         if (selected == null)
         {
-            StatusText.Text = "Select a device (click Refresh) or connect your phone.";
+            StatusMessage = "Select a device (click Refresh) or connect your phone.";
             return;
         }
         if (selected.State != "device")
         {
-            StatusText.Text = "Device not ready: " + selected.Description;
+            StatusMessage = "Device not ready: " + selected.Description;
             return;
         }
 
         LaunchBtn.IsEnabled = false;
-        StatusText.Text = "Starting mirror on " + selected.Description + "…";
+        StatusMessage = "Starting mirror on " + selected.Description + "…";
 
         // Ask scrcpy itself for a window sized to our pane (DPI-aware device pixels)
         // so it opens full-size from the start instead of being resized after launch.
@@ -164,10 +192,11 @@ public partial class MirrorPane : UserControl
                 CreateNoWindow = true,
             });
             _stderrTask = _scrcpyProcess!.StandardError.ReadToEndAsync();
+            AppendMirrorLog($"launch: \"{_scrcpy}\" {args}");
         }
         catch (Exception ex)
         {
-            StatusText.Text = "Failed to start scrcpy: " + ex.Message;
+            StatusMessage = "Failed to start scrcpy: " + ex.Message;
             LaunchBtn.IsEnabled = true;
             return;
         }
@@ -204,12 +233,13 @@ public partial class MirrorPane : UserControl
                 if (_stderrTask.Status == TaskStatus.RanToCompletion) output = _stderrTask.Result;
             }
 
-            StatusText.Text = "scrcpy exited before mirroring started." +
+            StatusMessage = "scrcpy exited before mirroring started." +
                 (string.IsNullOrWhiteSpace(output) ? "" : "\n\n" + TrimOutput(output));
+            AppendMirrorLog($"exited (code {_scrcpyProcess.ExitCode}): {output}");
         }
         else
         {
-            StatusText.Text = "Timed out waiting for the mirror window. Try Launch again.";
+            StatusMessage = "Timed out waiting for the mirror window. Try Launch again.";
         }
     }
 
@@ -233,7 +263,7 @@ public partial class MirrorPane : UserControl
 
         if (MirrorHost.ChildHwnd == IntPtr.Zero)
         {
-            StatusText.Text = "Mirror started but could not be embedded — look for a separate scrcpy window.";
+            StatusMessage = "Mirror started but could not be embedded — look for a separate scrcpy window.";
             return;
         }
 
@@ -243,7 +273,8 @@ public partial class MirrorPane : UserControl
 
         StartLivenessWatch();
         StartSizeSync();
-        StatusText.Text = "Mirror embedded — use the media buttons above to control playback from the laptop.";
+        AppendMirrorLog($"embedded: phone {_lastAppliedW}x{_lastAppliedH}, aspect {_phoneAspect:F3}");
+        StatusMessage = "Mirror embedded — use the media buttons above to control playback from the laptop.";
     }
 
     private void ResizeMirror()
@@ -435,7 +466,7 @@ public partial class MirrorPane : UserControl
 
         MirrorPanel.Visibility = Visibility.Collapsed;
         MirrorSetup.Visibility = Visibility.Visible;
-        StatusText.Text = message;
+        StatusMessage = message;
 
         if (_adb != null) _ = RefreshAsync();
     }
@@ -482,27 +513,27 @@ public partial class MirrorPane : UserControl
 
     private async void OnWifiEnable(object sender, RoutedEventArgs e)
     {
-        if (_adb == null) { StatusText.Text = "Refresh devices first (scrcpy/adb must be found)."; return; }
+        if (_adb == null) { StatusMessage = "Refresh devices first (scrcpy/adb must be found)."; return; }
 
         var output = await ScrcpyService.RunAdbAsync(_adb, "tcpip 5555");
-        StatusText.Text = $"Wi-Fi mode: {output}\nNow unplug USB, enter the phone's IP above and click Connect.";
+        StatusMessage = $"Wi-Fi mode: {output}\nNow unplug USB, enter the phone's IP above and click Connect.";
     }
 
     private async void OnWifiConnect(object sender, RoutedEventArgs e)
     {
-        if (_adb == null) { StatusText.Text = "Refresh devices first (scrcpy/adb must be found)."; return; }
+        if (_adb == null) { StatusMessage = "Refresh devices first (scrcpy/adb must be found)."; return; }
 
         var ip = PhoneIpBox.Text.Trim();
         if (string.IsNullOrEmpty(ip))
         {
-            StatusText.Text = "Enter the phone's IP address first (e.g. 192.168.1.8).";
+            StatusMessage = "Enter the phone's IP address first (e.g. 192.168.1.8).";
             return;
         }
 
         var target = ip.Contains(':') ? ip : $"{ip}:5555";
-        StatusText.Text = $"Connecting to {target}…";
+        StatusMessage = $"Connecting to {target}…";
         var output = await ScrcpyService.RunAdbAsync(_adb, $"connect {target}");
-        StatusText.Text = $"Connect: {output}";
+        StatusMessage = $"Connect: {output}";
         await RefreshAsync();
     }
 }

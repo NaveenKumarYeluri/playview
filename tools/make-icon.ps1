@@ -3,7 +3,7 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
-$sizes = 16, 32, 48, 256
+$sizes = 16, 32, 48, 64, 96, 128, 256
 $outPath = Join-Path $PSScriptRoot '..\src\PlayView\Assets\app.ico'
 New-Item -ItemType Directory -Force -Path (Split-Path $outPath) | Out-Null
 
@@ -11,6 +11,7 @@ function New-PlayBitmap([int]$s) {
     $bmp = New-Object System.Drawing.Bitmap $s, $s
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
     $g.Clear([System.Drawing.Color]::Transparent)
 
     # Full-bleed rounded square (no inset -> crisper at small sizes)
