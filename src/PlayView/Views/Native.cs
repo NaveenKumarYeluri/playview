@@ -15,6 +15,8 @@ internal static class Native
     public const long WS_MAXIMIZEBOX = 0x00010000L;
     public const uint WM_CLOSE = 0x0010;
 
+    public delegate IntPtr WndProc(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+
     public const int SW_HIDE = 0;
     public const int SW_SHOW = 5;
 
@@ -41,6 +43,36 @@ internal static class Native
 
     [DllImport("user32.dll")]
     public static extern bool GetClientRect(IntPtr hWnd, out RECT rect);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+    [DllImport("user32.dll")]
+    public static extern ushort RegisterClassW(ref WNDCLASS windowClass);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr DefWindowProcW(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateSolidBrush(uint color);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr GetModuleHandleW(string? moduleName);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct WNDCLASS
+    {
+        public uint Style;
+        public IntPtr WndProc;
+        public int ClsExtra;
+        public int WndExtra;
+        public IntPtr Instance;
+        public IntPtr Icon;
+        public IntPtr Cursor;
+        public IntPtr Background;
+        public string? MenuName;
+        public string ClassName;
+    }
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr CreateWindowExW(int exStyle, string className, string? windowName, int style,

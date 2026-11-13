@@ -19,6 +19,7 @@ public partial class MirrorPane : UserControl
     private Task<string>? _stderrTask;
     private IntPtr _scrcpyHwnd;
     private DispatcherTimer? _livenessTimer;
+    private DispatcherTimer? _sizeTimer;
 
     public MirrorPane()
     {
@@ -205,14 +206,39 @@ public partial class MirrorPane : UserControl
         Native.ShowWindow(hwnd, Native.SW_SHOW);
 
         StartLivenessWatch();
-        StatusText.Text = "Mirror embedded — click the phone screen to interact, type with your laptop keyboard.";
+        StartSizeSync();
+        StatusText.Text = "Mirror embedded — use the media buttons above to control playback from the laptop.";
     }
 
     private void ResizeMirror()
     {
         if (_scrcpyHwnd == IntPtr.Zero || MirrorHost.ChildHwnd == IntPtr.Zero) return;
-        if (Native.GetClientRect(MirrorHost.ChildHwnd, out var rect))
-            Native.MoveWindow(_scrcpyHwnd, 0, 0, rect.Right - rect.Left, rect.Bottom - rect.Top, true);
+        if (!Native.GetClientRect(MirrorHost.ChildHwnd, out var client)) return;
+
+        var hostWidth = client.Right - client.Left;
+        var hostHeight = client.Bottom - client.Top;
+        if (hostWidth <= 0 || hostHeight <= 0) return;
+
+        // The phone window's own size defines the screen aspect (handles rotation).
+        if (!Native.GetWindowRect(_scrcpyHwnd, out var window)) return;
+        var videoWidth = window.Right - window.Left;
+        var videoHeight = window.Bottom - window.Top;
+        if (videoWidth <= 0 || videoHeight <= 0) return;
+
+        // Aspect-fit like a video player, centred with black bars.
+        var scale = Math.Min((double)hostWidth / videoWidth, (double)hostHeight / videoHeight);
+        var width = (int)(videoWidth * scale);
+        var height = (int)(videoHeight * scale);
+
+        Native.MoveWindow(_scrcpyHwnd, (hostWidth - width) / 2, (hostHeight - height) / 2, width, height, true);
+    }
+
+    private void StartSizeSync()
+    {
+        _sizeTimer?.Stop();
+        _sizeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
+        _sizeTimer.Tick += (_, _) => ResizeMirror();
+        _sizeTimer.Start();
     }
 
     private void StartLivenessWatch()
@@ -228,6 +254,27 @@ public partial class MirrorPane : UserControl
             }
         };
         _livenessTimer.Start();
+    }
+
+    // ── Media controls (adb key events — work regardless of window focus) ──
+
+    private async void OnPlayPauseKey(object sender, RoutedEventArgs e) => await SendKeyEvent(85);
+    private async void OnVolDown(object sender, RoutedEventArgs e) => await SendKeyEvent(25);
+    private async void OnVolUp(object sender, RoutedEventArgs e) => await SendKeyEvent(24);
+    private async void OnBackKey(object sender, RoutedEventArgs e) => await SendKeyEvent(4);
+    private async void OnHomeKey(object sender, RoutedEventArgs e) => await SendKeyEvent(3);
+
+    private async Task SendKeyEvent(int keyCode)
+    {
+        if (_adb == null || _scrcpyProcess is not { HasExited: false }) return;
+        try
+        {
+            await ScrcpyService.RunAdbAsync(_adb, $"shell input keyevent {keyCode}");
+        }
+        catch
+        {
+            // Phone busy or disconnected — the liveness watch will catch the exit.
+        }
     }
 
     // ── Stop / teardown ──────────────────────────────────────────────────
@@ -258,6 +305,7 @@ public partial class MirrorPane : UserControl
         }
 
         _livenessTimer?.Stop();
+        _sizeTimer?.Stop();
         ResetMirrorUi("Mirror stopped.");
     }
 
@@ -266,6 +314,9 @@ public partial class MirrorPane : UserControl
         _scrcpyHwnd = IntPtr.Zero;
         _scrcpyProcess = null;
         _stderrTask = null;
+
+        _livenessTimer?.Stop();
+        _sizeTimer?.Stop();
 
         MirrorPanel.Visibility = Visibility.Collapsed;
         MirrorSetup.Visibility = Visibility.Visible;

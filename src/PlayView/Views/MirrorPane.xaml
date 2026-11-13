@@ -69,6 +69,13 @@
         <DockPanel LastChildFill="True">
           <Button Style="{StaticResource TransportButton}" Content="⏹" FontFamily="Segoe UI Symbol"
                   Click="OnStopMirror" ToolTip="Stop mirror"/>
+          <Button Style="{StaticResource TransportButton}" Content="⏯" FontFamily="Segoe UI Symbol"
+                  Click="OnPlayPauseKey" ToolTip="Play / pause on phone"/>
+          <Button Style="{StaticResource TransportButton}" Content="🔉" Click="OnVolDown" ToolTip="Volume down"/>
+          <Button Style="{StaticResource TransportButton}" Content="🔊" Click="OnVolUp" ToolTip="Volume up"/>
+          <Button Style="{StaticResource TransportButton}" Content="⬅" Click="OnBackKey" ToolTip="Back"/>
+          <Button Style="{StaticResource TransportButton}" Content="⌂" FontFamily="Segoe UI Symbol"
+                  Click="OnHomeKey" ToolTip="Home"/>
           <Button DockPanel.Dock="Right" Style="{StaticResource TransportButton}" Content="Setup"
                   Click="OnBackToSetup" ToolTip="Back to setup (mirror keeps running)"/>
           <TextBlock x:Name="MirrorTitleText" VerticalAlignment="Center" Margin="10,0,6,0"
