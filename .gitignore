@@ -6,3 +6,9 @@ artifacts/
 *.user
 *.suo
 *.zip
+
+# Android build outputs
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties

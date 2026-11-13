@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
+using LibVLCSharp.Shared;
 using Microsoft.Win32;
 using PlayView.Services;
 
@@ -28,9 +29,21 @@ public partial class MirrorPane : UserControl
     private bool _embedded;
     private bool _windowHooked;
 
+    // PlayView stream (LibVLC playback of the phone's MPEG-TS stream)
+    private const int StreamPort = 48335;
+    private LibVLC? _streamLibVlc;
+    private MediaPlayer? _streamPlayer;
+    private bool _streaming;
+
     public MirrorPane()
     {
         InitializeComponent();
+
+        // The VLC VideoView hosts a floating overlay window that swallows clicks
+        // while it is in the visual tree (same issue as the player pane) — so it
+        // stays out of the tree until a stream actually starts.
+        StreamGrid.Children.Remove(StreamVideo);
+
         Loaded += async (_, _) =>
         {
             HookWindowEvents();
@@ -80,8 +93,153 @@ public partial class MirrorPane : UserControl
 
     private void OnPaneVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
-        if (_scrcpyHwnd == IntPtr.Zero) return;
-        Native.ShowWindow(_scrcpyHwnd, (bool)e.NewValue ? Native.SW_SHOWNA : Native.SW_HIDE);
+        var visible = (bool)e.NewValue;
+
+        if (_scrcpyHwnd != IntPtr.Zero)
+            Native.ShowWindow(_scrcpyHwnd, visible ? Native.SW_SHOWNA : Native.SW_HIDE);
+
+        // VLC stream VideoView: detach when hidden (its overlay would swallow
+        // clicks in whatever pane is active), re-attach when shown.
+        if (visible)
+        {
+            if (_streaming && StreamVideo.Parent == null)
+                StreamGrid.Children.Add(StreamVideo);
+        }
+        else if (StreamVideo.Parent is System.Windows.Controls.Panel panel)
+            panel.Children.Remove(StreamVideo);
+    }
+
+    // ── PlayView stream (phone streams MPEG-TS, VLC plays it) ─────────────
+
+    private async void OnStreamStartUsb(object sender, RoutedEventArgs e)
+    {
+        if (_adb == null)
+        {
+            StatusMessage = "Connect the phone over USB (with USB debugging) first — click Refresh.";
+            return;
+        }
+
+        StatusMessage = "Setting up the USB stream tunnel…";
+        try
+        {
+            var output = await ScrcpyService.RunAdbAsync(_adb, $"forward tcp:{StreamPort} tcp:{StreamPort}");
+            AppendMirrorLog($"adb forward: {output}");
+        }
+        catch (Exception ex)
+        {
+            StatusMessage = "adb forward failed: " + ex.Message;
+            return;
+        }
+
+        StartStream($"http://127.0.0.1:{StreamPort}");
+    }
+
+    private void OnStreamStartWifi(object sender, RoutedEventArgs e)
+    {
+        var ip = StreamIpBox.Text.Trim();
+        if (string.IsNullOrEmpty(ip))
+        {
+            StatusMessage = "Enter the phone's IP (shown in the PlayView Stream app) for Wi-Fi streaming.";
+            return;
+        }
+
+        StartStream($"http://{ip}:{StreamPort}");
+    }
+
+    private async void StartStream(string url)
+    {
+        if (_streaming)
+        {
+            StatusMessage = "A stream is already playing — stop it first.";
+            return;
+        }
+        if (_scrcpyProcess is { HasExited: false })
+        {
+            StatusMessage = "The scrcpy mirror is running — stop it before streaming.";
+            return;
+        }
+
+        StatusMessage = "Connecting to the phone's stream…";
+        AppendMirrorLog($"stream start: {url}");
+
+        try
+        {
+            _streamLibVlc ??= new LibVLC("--no-video-title-show");
+            _streamPlayer ??= CreateStreamPlayer();
+
+            // Attach the VideoView first — it needs to be loaded to host video.
+            MirrorSetup.Visibility = Visibility.Collapsed;
+            MirrorPanel.Visibility = Visibility.Visible;
+            StreamVideo.Visibility = Visibility.Visible;
+            MirrorHost.Visibility = Visibility.Collapsed;
+            MirrorTitleText.Text = "Streaming — connecting…";
+
+            if (StreamVideo.Parent == null)
+                StreamGrid.Children.Add(StreamVideo);
+
+            for (var i = 0; i < 50 && !StreamVideo.IsLoaded; i++)
+                await Task.Delay(20);
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+
+            StreamVideo.MediaPlayer = _streamPlayer;
+
+            using var media = new Media(_streamLibVlc, new Uri(url));
+            media.AddOption(":network-caching=300");
+            _streamPlayer.Play(media);
+
+            _streaming = true;
+            StatusMessage = "Streaming from the phone through VLC's engine.";
+        }
+        catch (Exception ex)
+        {
+            AppendMirrorLog($"stream failed: {ex.Message}");
+            EndStreamUi("Could not start the stream: " + ex.Message +
+                        "\n\nMake sure the PlayView Stream app is running on the phone (Start streaming) " +
+                        "and the phone is connected (USB) or on the same Wi-Fi network.");
+        }
+    }
+
+    private MediaPlayer CreateStreamPlayer()
+    {
+        var player = new MediaPlayer(_streamLibVlc!) { Volume = 85 };
+        player.EndReached += (_, _) => Dispatcher.InvokeAsync(
+            () => EndStreamUi("Stream ended — the phone stopped streaming or disconnected."));
+        player.EncounteredError += (_, _) => Dispatcher.InvokeAsync(
+            () => EndStreamUi("Stream error — check that the PlayView Stream app is still streaming."));
+        return player;
+    }
+
+    private void OnStreamStop(object sender, RoutedEventArgs e)
+    {
+        try { if (_streamPlayer is { IsPlaying: true }) _streamPlayer.Stop(); }
+        catch { /* already stopped */ }
+        EndStreamUi("Stream stopped.");
+    }
+
+    private void EndStreamUi(string message)
+    {
+        if (!_streaming && StreamVideo.Parent == null)
+        {
+            StatusMessage = message;
+            return;
+        }
+
+        _streaming = false;
+        try { _streamPlayer?.Stop(); } catch { /* already stopped */ }
+
+        if (StreamVideo.Parent is System.Windows.Controls.Panel panel)
+            panel.Children.Remove(StreamVideo);
+        StreamVideo.Visibility = Visibility.Collapsed;
+        MirrorHost.Visibility = Visibility.Visible;
+
+        MirrorPanel.Visibility = Visibility.Collapsed;
+        MirrorSetup.Visibility = Visibility.Visible;
+        ReturnBtn.Visibility = Visibility.Collapsed;
+        MirrorTitleText.Text = "";
+        StatusMessage = message;
+
+        AppendMirrorLog("stream stopped");
+        if (_adb != null) _ = RefreshAsync();
     }
 
     // ── Device refresh ───────────────────────────────────────────────────
@@ -157,6 +315,11 @@ public partial class MirrorPane : UserControl
 
         if (_scrcpyProcess is { HasExited: false })
         {
+            if (_streaming)
+            {
+                StatusMessage = "A stream is playing — stop it before launching the mirror.";
+                return;
+            }
             if (_embedded)
             {
                 StatusMessage = "A mirror session is already running — stop it first.";
@@ -554,6 +717,17 @@ public partial class MirrorPane : UserControl
 
     private void OnBackToSetup(object sender, RoutedEventArgs e)
     {
+        if (_streaming)
+        {
+            // Detach the video view so the setup controls are clickable.
+            if (StreamVideo.Parent is System.Windows.Controls.Panel panel)
+                panel.Children.Remove(StreamVideo);
+
+            ReturnBtn.Visibility = Visibility.Visible;
+            MirrorSetup.Visibility = Visibility.Visible;
+            return;
+        }
+
         // Keep the mirror running; just show the setup controls again.
         if (_scrcpyHwnd != IntPtr.Zero)
             Native.ShowWindow(_scrcpyHwnd, Native.SW_HIDE);
@@ -566,6 +740,15 @@ public partial class MirrorPane : UserControl
     {
         MirrorSetup.Visibility = Visibility.Collapsed;
         MirrorPanel.Visibility = Visibility.Visible;
+
+        if (_streaming)
+        {
+            if (StreamVideo.Parent == null)
+                StreamGrid.Children.Add(StreamVideo);
+            StreamVideo.Visibility = Visibility.Visible;
+            MirrorHost.Visibility = Visibility.Collapsed;
+            return;
+        }
 
         if (_scrcpyHwnd != IntPtr.Zero)
         {
@@ -630,6 +813,20 @@ public partial class MirrorPane : UserControl
             if (_scrcpyProcess is { HasExited: false }) _scrcpyProcess.Kill(true);
         }
         catch { /* already gone */ }
+
+        try
+        {
+            if (_streamPlayer != null)
+            {
+                _streaming = false;
+                if (_streamPlayer.IsPlaying) _streamPlayer.Stop();
+                _streamPlayer.Dispose();
+                _streamPlayer = null;
+            }
+            _streamLibVlc?.Dispose();
+            _streamLibVlc = null;
+        }
+        catch { /* player already gone */ }
 
         _ = KillDeviceServerAsync();
     }
