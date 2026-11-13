@@ -21,7 +21,6 @@ public partial class MirrorPane : UserControl
     private IntPtr _scrcpyHwnd;
     private DispatcherTimer? _livenessTimer;
     private DispatcherTimer? _sizeTimer;
-    private double _phoneAspect;   // width / height, from scrcpy's natural window size
     private int _lastAppliedW;
     private int _lastAppliedH;
     private int _lastAppliedX;
@@ -191,7 +190,13 @@ public partial class MirrorPane : UserControl
 
         LaunchBtn.IsEnabled = false;
 
-        var baseArgs = $"-s {selected.Serial} --window-title {WindowName} --window-borderless";
+        // Open scrcpy's window already sitting on the pane area (physical pixels),
+        // full pane size — scrcpy letterboxes the video inside, exactly like a
+        // plain scrcpy window. No hiding, no post-creation surgery.
+        var pane = GetPanePixelRect();
+        var baseArgs = $"-s {selected.Serial} --window-title {WindowName} --window-borderless" +
+                       $" --window-x {pane.X} --window-y {pane.Y}" +
+                       $" --window-width {pane.W} --window-height {pane.H}";
         if (SoftwareRenderCheck.IsChecked == true)
             baseArgs += " --render-driver=software";
         if (!string.IsNullOrWhiteSpace(ExtraArgsBox.Text)) baseArgs += " " + ExtraArgsBox.Text.Trim();
@@ -237,12 +242,6 @@ public partial class MirrorPane : UserControl
 
                 if (hwnd != IntPtr.Zero)
                 {
-                    // Capture the phone aspect from scrcpy's natural window size —
-                    // we pass no --window-… args, so it is the true device ratio.
-                    if (Native.GetWindowRect(hwnd, out var wr)
-                        && wr.Right > wr.Left && wr.Bottom > wr.Top)
-                        _phoneAspect = (double)(wr.Right - wr.Left) / (wr.Bottom - wr.Top);
-
                     await EmbedMirrorAsync(hwnd);
                     LaunchBtn.IsEnabled = true;
                     return;
@@ -307,17 +306,13 @@ public partial class MirrorPane : UserControl
     {
         _scrcpyHwnd = hwnd;
 
-        // scrcpy's window is used EXACTLY as scrcpy created it — no style, owner
-        // or ex-style changes. Altering a window after creation makes DWM
-        // composite it badly (blended ghost frames). Instead we glue it directly
-        // above our main window in z-order, over the pane area.
+        // scrcpy created its window already at the pane rect — we never hide,
+        // restyle or resize it at embed time (that blacks out the D3D swapchain).
         MirrorSetup.Visibility = Visibility.Collapsed;
         MirrorPanel.Visibility = Visibility.Visible;
+        _embedded = true;
 
-        // Hide the natural-size window while we compute its final spot (no flash).
-        Native.ShowWindow(hwnd, Native.SW_HIDE);
-
-        // Wait until the pane area has a real size to glue the window over.
+        // Correct any drift between the estimate at launch and the real layout.
         for (var i = 0; i < 100 && MirrorHost.ActualWidth < 10; i++)
             await Task.Delay(50);
 
@@ -331,11 +326,10 @@ public partial class MirrorPane : UserControl
         }
 
         PositionFloatingMirror();
-        _embedded = true;
 
         StartLivenessWatch();
         StartSizeSync();
-        AppendMirrorLog($"embedded (floating): phone {_lastAppliedW}x{_lastAppliedH}, aspect {_phoneAspect:F3}");
+        AppendMirrorLog($"embedded (floating): window {_lastAppliedW}x{_lastAppliedH} at ({_lastAppliedX},{_lastAppliedY})");
         StatusMessage = "Mirror embedded — use the media buttons above to control playback from the laptop.";
     }
 
@@ -389,12 +383,11 @@ public partial class MirrorPane : UserControl
 
     private void PositionFloatingMirror()
     {
-        if (_scrcpyHwnd == IntPtr.Zero || !_embedded) return;
+        if (_scrcpyHwnd == IntPtr.Zero) return;
 
         var paneW = MirrorHost.ActualWidth;
         var paneH = MirrorHost.ActualHeight;
         if (paneW < 10 || paneH < 10) return;
-        if (_phoneAspect <= 0) return;
 
         // Pane area in physical screen pixels (PointToScreen is DPI-aware).
         var topLeft = MirrorHost.PointToScreen(new Point(0, 0));
@@ -405,56 +398,43 @@ public partial class MirrorPane : UserControl
 
         var panePixelW = (int)Math.Round(paneW * dpi);
         var panePixelH = (int)Math.Round(paneH * dpi);
-        var paneX = (int)topLeft.X;
-        var paneY = (int)topLeft.Y;
-
-        // Detect self-resizes by scrcpy (e.g. phone rotation) and adopt the new aspect.
-        if (Native.GetWindowRect(_scrcpyHwnd, out var current) && _lastAppliedW > 0)
-        {
-            var curW = current.Right - current.Left;
-            var curH = current.Bottom - current.Top;
-            if (curW > 0 && curH > 0)
-            {
-                var devW = Math.Abs(curW - _lastAppliedW) / (double)_lastAppliedW;
-                var devH = Math.Abs(curH - _lastAppliedH) / (double)_lastAppliedH;
-                if (devW > 0.25 || devH > 0.25)
-                    _phoneAspect = (double)curW / curH;
-            }
-        }
-
-        // Fit the phone aspect into the pane, centred — VLC letterbox style.
-        int width, height;
-        if (panePixelW / (double)panePixelH > _phoneAspect)
-        {
-            height = panePixelH;
-            width = (int)(panePixelH * _phoneAspect);
-        }
-        else
-        {
-            width = panePixelW;
-            height = (int)(panePixelW / _phoneAspect);
-        }
-
-        var x = paneX + Math.Max(0, (panePixelW - width) / 2);
-        var y = paneY + Math.Max(0, (panePixelH - height) / 2);
+        var x = (int)topLeft.X;
+        var y = (int)topLeft.Y;
 
         // Skip no-op moves — needless repaints are what leave ghost trails behind.
-        if (width == _lastAppliedW && height == _lastAppliedH
+        if (panePixelW == _lastAppliedW && panePixelH == _lastAppliedH
             && x == _lastAppliedX && y == _lastAppliedY)
         {
-            MirrorTitleText.Text = $"Mirroring — phone screen {width}×{height} in pane {panePixelW}×{panePixelH}";
+            MirrorTitleText.Text = $"Mirroring — window {panePixelW}×{panePixelH} (scrcpy fits the video itself)";
             return;
         }
 
-        Native.SetWindowPos(_scrcpyHwnd, GetOwnerHwnd(), x, y, width, height,
+        // Full pane rect: scrcpy letterboxes the video inside its own window,
+        // so our only job is keeping the window glued over the pane, above us.
+        Native.SetWindowPos(_scrcpyHwnd, GetOwnerHwnd(), x, y, panePixelW, panePixelH,
             Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
-        _lastAppliedW = width;
-        _lastAppliedH = height;
+        _lastAppliedW = panePixelW;
+        _lastAppliedH = panePixelH;
         _lastAppliedX = x;
         _lastAppliedY = y;
 
         // Live diagnostics so issues are visible in the pane itself.
-        MirrorTitleText.Text = $"Mirroring — phone screen {width}×{height} in pane {panePixelW}×{panePixelH}";
+        MirrorTitleText.Text = $"Mirroring — window {panePixelW}×{panePixelH} at ({x},{y})";
+    }
+
+    /// <summary>Pane area in physical screen pixels, for scrcpy's launch args.</summary>
+    private (int X, int Y, int W, int H) GetPanePixelRect()
+    {
+        var dpi = 1.0;
+        var source = PresentationSource.FromVisual(this);
+        if (source?.CompositionTarget != null)
+            dpi = source.CompositionTarget.TransformToDevice.M11;
+
+        var origin = PointToScreen(new Point(0, 0));
+        // The mirror area is the pane minus the transport bar (~42 DIPs) above it.
+        var w = Math.Max(320, (int)(ActualWidth * dpi));
+        var h = Math.Max(240, (int)((ActualHeight - 42) * dpi));
+        return ((int)origin.X, (int)origin.Y, w, h);
     }
 
     private void StartSizeSync()
@@ -615,7 +595,6 @@ public partial class MirrorPane : UserControl
     {
         _scrcpyHwnd = IntPtr.Zero;
         _scrcpyProcess = null;
-        _phoneAspect = 0;
         _lastAppliedW = 0;
         _lastAppliedH = 0;
         _lastAppliedX = 0;
