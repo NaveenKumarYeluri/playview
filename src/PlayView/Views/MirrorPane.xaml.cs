@@ -190,6 +190,16 @@ public partial class MirrorPane : UserControl
 
         LaunchBtn.IsEnabled = false;
 
+        // Show the mirror panel first so the pane area has its real laid-out size,
+        // letting scrcpy open exactly there — no post-creation resize (that is
+        // what reintroduced letterbox artifacts).
+        MirrorSetup.Visibility = Visibility.Collapsed;
+        MirrorPanel.Visibility = Visibility.Visible;
+        MirrorTitleText.Text = "Starting mirror…";
+
+        for (var i = 0; i < 100 && MirrorHost.ActualWidth < 10; i++)
+            await Task.Delay(50);
+
         // Open scrcpy's window already sitting on the pane area (physical pixels),
         // full pane size — scrcpy letterboxes the video inside, exactly like a
         // plain scrcpy window. No hiding, no post-creation surgery.
@@ -224,9 +234,8 @@ public partial class MirrorPane : UserControl
             }
             catch (Exception ex)
             {
-                StatusMessage = "Failed to start scrcpy: " + ex.Message;
                 AppendMirrorLog($"start failed: {ex.Message}");
-                LaunchBtn.IsEnabled = true;
+                ResetMirrorUi("Failed to start scrcpy: " + ex.Message);
                 return;
             }
 
@@ -273,16 +282,14 @@ public partial class MirrorPane : UserControl
                 await KillDeviceServerAsync();
         }
 
-        LaunchBtn.IsEnabled = true;
-
         if (_scrcpyProcess is { HasExited: true })
         {
-            StatusMessage = "scrcpy exited before mirroring started." +
-                (string.IsNullOrWhiteSpace(lastError) ? "" : "\n\n" + TrimOutput(lastError));
+            ResetMirrorUi("scrcpy exited before mirroring started." +
+                (string.IsNullOrWhiteSpace(lastError) ? "" : "\n\n" + TrimOutput(lastError)));
         }
         else
         {
-            StatusMessage = "Timed out waiting for the mirror window. Try Launch again.";
+            ResetMirrorUi("Timed out waiting for the mirror window. Try Launch again.");
         }
     }
 
@@ -333,12 +340,6 @@ public partial class MirrorPane : UserControl
         StatusMessage = "Mirror embedded — use the media buttons above to control playback from the laptop.";
     }
 
-    private IntPtr GetOwnerHwnd()
-    {
-        var win = Window.GetWindow(this);
-        return win == null ? IntPtr.Zero : new System.Windows.Interop.WindowInteropHelper(win).Handle;
-    }
-
     private void HookWindowEvents()
     {
         if (_windowHooked) return;
@@ -348,7 +349,21 @@ public partial class MirrorPane : UserControl
         _windowHooked = true;
         win.LocationChanged += (_, _) => RepositionSoon();
         win.SizeChanged += (_, _) => RepositionSoon();
-        win.Activated += (_, _) => EnsureMirrorAboveOwner();
+        win.Activated += (_, _) =>
+        {
+            // Back in our app: re-glue the mirror over the pane, above everything.
+            if (!_embedded || _scrcpyHwnd == IntPtr.Zero) return;
+            Native.ShowWindow(_scrcpyHwnd, Native.SW_SHOWNA);
+            PositionFloatingMirror(force: true);
+        };
+        win.Deactivated += (_, _) =>
+        {
+            // Another app got focus: hide the mirror so it never floats over it —
+            // unless the user clicked the mirror itself (playing with the phone).
+            if (!_embedded || _scrcpyHwnd == IntPtr.Zero) return;
+            if (Native.GetForegroundWindow() != _scrcpyHwnd)
+                Native.ShowWindow(_scrcpyHwnd, Native.SW_HIDE);
+        };
         win.StateChanged += (_, _) =>
         {
             if (!_embedded || _scrcpyHwnd == IntPtr.Zero || win == null) return;
@@ -363,25 +378,14 @@ public partial class MirrorPane : UserControl
         };
     }
 
-    /// <summary>Keeps the mirror directly above our window in z-order (clicking our window re-glues it).</summary>
-    private void EnsureMirrorAboveOwner()
-    {
-        if (!_embedded || _scrcpyHwnd == IntPtr.Zero) return;
-        var owner = GetOwnerHwnd();
-        if (owner == IntPtr.Zero) return;
-
-        Native.SetWindowPos(_scrcpyHwnd, owner, 0, 0, 0, 0,
-            Native.SWP_NOACTIVATE | Native.SWP_NOMOVE | Native.SWP_NOSIZE);
-    }
-
     /// <summary>Repositions the floating mirror after any move/resize, batched per layout pass.</summary>
     private void RepositionSoon()
     {
         if (_scrcpyHwnd == IntPtr.Zero) return;
-        Dispatcher.InvokeAsync(PositionFloatingMirror, DispatcherPriority.Loaded);
+        Dispatcher.InvokeAsync(() => PositionFloatingMirror(), DispatcherPriority.Loaded);
     }
 
-    private void PositionFloatingMirror()
+    private void PositionFloatingMirror(bool force = false)
     {
         if (_scrcpyHwnd == IntPtr.Zero) return;
 
@@ -402,16 +406,17 @@ public partial class MirrorPane : UserControl
         var y = (int)topLeft.Y;
 
         // Skip no-op moves — needless repaints are what leave ghost trails behind.
-        if (panePixelW == _lastAppliedW && panePixelH == _lastAppliedH
+        if (!force && panePixelW == _lastAppliedW && panePixelH == _lastAppliedH
             && x == _lastAppliedX && y == _lastAppliedY)
         {
             MirrorTitleText.Text = $"Mirroring — window {panePixelW}×{panePixelH} (scrcpy fits the video itself)";
             return;
         }
 
-        // Full pane rect: scrcpy letterboxes the video inside its own window,
-        // so our only job is keeping the window glued over the pane, above us.
-        Native.SetWindowPos(_scrcpyHwnd, GetOwnerHwnd(), x, y, panePixelW, panePixelH,
+        // Full pane rect, in the topmost band so our window can never bury it —
+        // the pane's own chrome (top bar) stays below its area anyway. scrcpy
+        // letterboxes the video inside its own window, VLC-style.
+        Native.SetWindowPos(_scrcpyHwnd, Native.HWND_TOPMOST, x, y, panePixelW, panePixelH,
             Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
         _lastAppliedW = panePixelW;
         _lastAppliedH = panePixelH;
@@ -430,10 +435,9 @@ public partial class MirrorPane : UserControl
         if (source?.CompositionTarget != null)
             dpi = source.CompositionTarget.TransformToDevice.M11;
 
-        var origin = PointToScreen(new Point(0, 0));
-        // The mirror area is the pane minus the transport bar (~42 DIPs) above it.
-        var w = Math.Max(320, (int)(ActualWidth * dpi));
-        var h = Math.Max(240, (int)((ActualHeight - 42) * dpi));
+        var origin = MirrorHost.PointToScreen(new Point(0, 0));
+        var w = Math.Max(320, (int)(MirrorHost.ActualWidth * dpi));
+        var h = Math.Max(240, (int)(MirrorHost.ActualHeight * dpi));
         return ((int)origin.X, (int)origin.Y, w, h);
     }
 
