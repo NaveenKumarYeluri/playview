@@ -364,7 +364,7 @@ public class StreamService extends Service {
                 record = new AudioRecord.Builder()
                         .setAudioFormat(af)
                         .setBufferSizeInBytes(Math.max(minBuf, 64 * 1024))
-                        .setAudioPlaybackCaptureConfiguration(cfg)
+                        .setAudioPlaybackCaptureConfig(cfg)
                         .build();
 
                 MediaFormat f = MediaFormat.createAudioFormat(
