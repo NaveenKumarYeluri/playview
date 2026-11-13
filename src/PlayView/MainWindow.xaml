@@ -1,0 +1,125 @@
+<Window x:Class="PlayView.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:PlayView.Views"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
+        Title="PlayView" Width="1280" Height="760" MinWidth="900" MinHeight="560"
+        Background="{StaticResource Brush.Chrome}"
+        WindowStartupLocation="CenterScreen"
+        AllowDrop="True" Drop="OnDrop">
+
+  <shell:WindowChrome.WindowChrome>
+    <shell:WindowChrome CaptionHeight="34" ResizeBorderThickness="6"
+                        GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False"/>
+  </shell:WindowChrome.WindowChrome>
+
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="34"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <!-- Custom dark title bar -->
+    <Grid Background="{StaticResource Brush.Chrome}">
+      <TextBlock Text="PlayView" Margin="12,0,0,0" VerticalAlignment="Center"
+                 Foreground="{StaticResource Brush.SubText}" FontSize="12"/>
+      <StackPanel HorizontalAlignment="Right" Orientation="Horizontal"
+                  shell:WindowChrome.IsHitTestVisibleInChrome="True">
+        <Button Style="{StaticResource CaptionButton}" Content="&#xE921;" Click="OnMinimize" ToolTip="Minimize"/>
+        <Button Style="{StaticResource CaptionButton}" Content="&#xE922;" Click="OnMaximize" ToolTip="Maximize"/>
+        <Button Style="{StaticResource CaptionButton}" Content="&#xE8BB;" Click="OnClose" ToolTip="Close"/>
+      </StackPanel>
+    </Grid>
+
+    <!-- Menu bar -->
+    <Menu x:Name="MenuBar" Grid.Row="1">
+      <MenuItem Header="_Media">
+        <MenuItem Header="_Open File…" Click="OnOpenFile" InputGestureText="Ctrl+O"/>
+        <MenuItem Header="Open _Folder…" Click="OnOpenFolder" InputGestureText="Ctrl+Shift+O"/>
+        <Separator/>
+        <MenuItem Header="_Close" Click="OnStop"/>
+        <Separator/>
+        <MenuItem Header="E_xit" Click="OnClose"/>
+      </MenuItem>
+      <MenuItem Header="_View">
+        <MenuItem Header="_Fullscreen" Click="OnToggleFullscreen" InputGestureText="F"/>
+        <MenuItem Header="_Playlist" Click="OnTogglePlaylist"/>
+        <MenuItem x:Name="MenuSidebar" Header="S_idebar" Click="OnToggleSidebar"/>
+      </MenuItem>
+      <MenuItem Header="_Tools">
+        <MenuItem Header="Open _Settings Folder" Click="OnOpenSettingsFolder"/>
+        <MenuItem Header="_Reload Settings" Click="OnReloadSettings"/>
+      </MenuItem>
+      <MenuItem Header="_Help">
+        <MenuItem Header="_About" Click="OnAbout"/>
+      </MenuItem>
+    </Menu>
+
+    <!-- Sidebar + content -->
+    <Grid Grid.Row="2">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition x:Name="SidebarColumn" Width="180"/>
+        <ColumnDefinition Width="*"/>
+      </Grid.ColumnDefinitions>
+
+      <Border x:Name="SidebarBorder" Grid.Column="0" Background="{StaticResource Brush.Sidebar}"
+              BorderBrush="{StaticResource Brush.Border}" BorderThickness="0,0,1,0">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel x:Name="Sidebar" Margin="0,6,0,6"/>
+        </ScrollViewer>
+      </Border>
+
+      <Grid Grid.Column="1">
+        <views:PlayerPane x:Name="PlayerView"/>
+        <ContentControl x:Name="OttHost"/>
+        <views:MirrorPane x:Name="MirrorView"/>
+      </Grid>
+    </Grid>
+
+    <!-- Transport bar -->
+    <Border x:Name="TransportBar" Grid.Row="3" Background="{StaticResource Brush.Chrome}"
+            BorderBrush="{StaticResource Brush.Border}" BorderThickness="0,1,0,0" Padding="10,6">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="10"/>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+
+        <Button x:Name="PlayPauseBtn" Grid.Column="0" Style="{StaticResource TransportButton}"
+                Content="▶" FontFamily="Segoe UI Symbol" Click="OnPlayPause" ToolTip="Play / pause (Space)"/>
+        <Button x:Name="StopBtn" Grid.Column="1" Style="{StaticResource TransportButton}"
+                Content="⏹" FontFamily="Segoe UI Symbol" Click="OnStop" ToolTip="Stop"/>
+        <Button Grid.Column="2" Style="{StaticResource TransportButton}"
+                Content="⏪" FontFamily="Segoe UI Symbol" Click="OnBack10" ToolTip="Back 10 s (←)"/>
+        <Button Grid.Column="3" Style="{StaticResource TransportButton}"
+                Content="⏩" FontFamily="Segoe UI Symbol" Click="OnFwd10" ToolTip="Forward 10 s (→)"/>
+
+        <Slider x:Name="ProgressSlider" Grid.Column="5" Minimum="0" Maximum="1"
+                VerticalAlignment="Center"
+                PreviewMouseLeftButtonDown="OnProgressDown"
+                PreviewMouseLeftButtonUp="OnProgressUp"/>
+
+        <TextBlock x:Name="TimeText" Grid.Column="6" Text="00:00 / 00:00" Margin="8,0,10,0"
+                   VerticalAlignment="Center" Foreground="{StaticResource Brush.SubText}" FontSize="12"/>
+
+        <TextBlock Grid.Column="7" Text="🔊" VerticalAlignment="Center" FontSize="13" Margin="0,0,6,0"/>
+        <Slider x:Name="VolumeSlider" Grid.Column="8" Width="90" Minimum="0" Maximum="125"
+                Value="85" VerticalAlignment="Center" ValueChanged="OnVolumeChanged"/>
+
+        <Button Grid.Column="9" Style="{StaticResource TransportButton}" Margin="10,0,0,0"
+                Content="⛶" FontFamily="Segoe UI Symbol" Click="OnToggleFullscreen" ToolTip="Fullscreen (F)"/>
+      </Grid>
+    </Border>
+  </Grid>
+
+</Window>

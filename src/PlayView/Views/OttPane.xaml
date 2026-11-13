@@ -1,0 +1,28 @@
+<UserControl x:Class="PlayView.Views.OttPane"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf">
+
+  <DockPanel Background="{StaticResource Brush.Pane}">
+    <Border DockPanel.Dock="Top" Background="{StaticResource Brush.Chrome}"
+            BorderBrush="{StaticResource Brush.Border}" BorderThickness="0,0,0,1" Padding="6,4">
+      <DockPanel LastChildFill="True">
+        <Button Style="{StaticResource TransportButton}" Content="←" Click="OnBack" ToolTip="Back"/>
+        <Button Style="{StaticResource TransportButton}" Content="→" Click="OnForward" ToolTip="Forward"/>
+        <Button Style="{StaticResource TransportButton}" Content="⟳" FontFamily="Segoe UI Symbol" Click="OnReload" ToolTip="Reload"/>
+        <Button Style="{StaticResource TransportButton}" Content="⌂" FontFamily="Segoe UI Symbol" Click="OnHome" ToolTip="Service home"/>
+        <TextBlock x:Name="AddressText" VerticalAlignment="Center" Margin="12,0,6,0"
+                   Foreground="{StaticResource Brush.SubText}" FontSize="12"
+                   TextTrimming="CharacterEllipsis"/>
+      </DockPanel>
+    </Border>
+
+    <Grid>
+      <wv2:WebView2 x:Name="Web" DefaultBackgroundColor="Black"/>
+      <TextBlock x:Name="ErrorHint" Visibility="Collapsed" Margin="24"
+                 Foreground="{StaticResource Brush.SubText}" TextWrapping="Wrap"
+                 TextAlignment="Center" VerticalAlignment="Center"/>
+    </Grid>
+  </DockPanel>
+
+</UserControl>

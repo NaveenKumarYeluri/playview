@@ -1,0 +1,48 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore src/PlayView/PlayView.csproj
+
+      - name: Build
+        run: dotnet build src/PlayView/PlayView.csproj -c Release --no-restore
+
+      - name: Publish (portable, self-contained)
+        run: dotnet publish src/PlayView/PlayView.csproj -c Release -r win-x64 --self-contained true -o publish
+
+      - name: Flatten native runtime libs (if any)
+        shell: pwsh
+        run: |
+          if (Test-Path "publish/runtimes/win-x64/native") {
+            Copy-Item "publish/runtimes/win-x64/native/*" "publish/" -Force
+            Remove-Item "publish/runtimes" -Recurse -Force
+          }
+          if (Test-Path "publish/libvlc/win-x86") {
+            Remove-Item "publish/libvlc/win-x86" -Recurse -Force
+          }
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path "publish/*" -DestinationPath "PlayView-win-x64.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlayView-win-x64
+          path: PlayView-win-x64.zip
