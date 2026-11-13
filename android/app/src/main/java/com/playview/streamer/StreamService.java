@@ -15,28 +15,33 @@ import android.media.AudioRecord;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
-import android.media.MediaMuxer;
 import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.IBinder;
-import android.os.ParcelFileDescriptor;
 import android.util.DisplayMetrics;
 import android.view.Surface;
 import android.view.WindowManager;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 
 /**
  * Captures the phone screen (video) and playback audio, hardware-encodes both,
  * and serves them as a standard MPEG-TS stream over TCP — which PlayView plays
- * with LibVLC like any other network stream. One client at a time; the stream
- * restarts (fresh PAT/PMT + SPS/PPS) for every new connection, so the laptop
- * can always join mid-session.
+ * with LibVLC like any other network stream. VLC connects with a plain HTTP
+ * request; the phone answers with a minimal 200 and a raw TS body.
+ * <p>
+ * One client at a time; the stream restarts (fresh PAT/PMT + SPS/PPS) for every
+ * new connection, so the laptop can always join mid-session.
  */
 public class StreamService extends Service {
 
@@ -136,7 +141,7 @@ public class StreamService extends Service {
                 Socket client = server.accept();
                 currentClient = client;
                 try {
-                    streamTo(client);
+                    serveHttp(client);
                 } catch (Throwable ignored) {
                     // Client gone or device hiccup — wait for the next connection.
                 } finally {
@@ -156,9 +161,39 @@ public class StreamService extends Service {
         }
     }
 
-    private void streamTo(Socket client) throws Exception {
+    // ── HTTP: read the request, answer, then stream the TS body ─────────────
+
+    private void serveHttp(Socket client) throws Exception {
         client.setTcpNoDelay(true);
 
+        // Read the request head (VLC sends a GET) — best effort.
+        try {
+            client.setSoTimeout(5000);
+            InputStream in = client.getInputStream();
+            ByteArrayOutputStream req = new ByteArrayOutputStream();
+            byte[] buf = new byte[1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                req.write(buf, 0, n);
+                String head = req.toString("ISO-8859-1");
+                if (head.contains("\r\n\r\n") || req.size() > 8192) break;
+            }
+        } catch (SocketTimeoutException ignored) {
+            // No request sent — serve the body anyway (raw TCP clients).
+        }
+
+        OutputStream out = client.getOutputStream();
+        out.write(("HTTP/1.1 200 OK\r\n"
+                + "Content-Type: video/mp2t\r\n"
+                + "Connection: close\r\n"
+                + "Cache-Control: no-cache\r\n"
+                + "\r\n").getBytes("ISO-8859-1"));
+        out.flush();
+
+        streamTo(client, out);
+    }
+
+    private void streamTo(Socket client, OutputStream out) throws Exception {
         DisplayMetrics m = new DisplayMetrics();
         WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         wm.getDefaultDisplay().getRealMetrics(m);
@@ -167,66 +202,45 @@ public class StreamService extends Service {
         int w = m.widthPixels * 2 / 3;  w -= w % 2;
         int h = m.heightPixels * 2 / 3; h -= h % 2;
 
-        ParcelFileDescriptor pfd = ParcelFileDescriptor.fromSocket(client);
-        MediaMuxer mux = new MediaMuxer(pfd.getFileDescriptor(),
-                MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_TS);
-        Object lock = new Object();
-        boolean[] started = { false };
+        TSMuxer mux = new TSMuxer(out);
 
-        VideoPipeline video = new VideoPipeline(mux, lock, started, w, h, m.densityDpi);
+        VideoPipeline video = new VideoPipeline(mux, w, h, m.densityDpi);
         AudioPipeline audio = Build.VERSION.SDK_INT >= 29
-                ? new AudioPipeline(mux, lock, started)
+                ? new AudioPipeline(mux)
                 : null;
 
         try {
             video.start();
             if (audio != null) audio.start();
 
-            // Wait for both tracks (or fall back to video-only after 4 s).
-            long deadline = System.currentTimeMillis() + 4000;
-            while (System.currentTimeMillis() < deadline && running) {
-                if (video.track >= 0 && (audio == null || audio.track >= 0)) break;
-                Thread.sleep(20);
-            }
-            if (video.track >= 0 && audio != null && audio.track < 0) {
-                audio.stop();
-                audio = null;
-            }
-
-            if (video.track >= 0 && (audio == null || audio.track >= 0)) {
-                synchronized (lock) { mux.start(); }
-                started[0] = true;
-
-                // Block until the video pipeline ends (client disconnect, stop…).
-                while (video.drainThread.isAlive() && running) {
-                    video.drainThread.join(200);
-                }
+            // Block until the video pipeline ends (client disconnect, stop…).
+            while (video.drainThread.isAlive() && running) {
+                video.drainThread.join(200);
             }
         } finally {
             if (audio != null) audio.stop();
             video.stop();
-            try { mux.release(); } catch (Exception ignored) { }
-            try { pfd.close(); } catch (Exception ignored) { }
         }
     }
 
-    // ── Video pipeline (MediaProjection → H.264 encoder) ────────────────────
+    // ── Video pipeline (MediaProjection → H.264 → TSMuxer) ──────────────────
 
     private final class VideoPipeline {
-        final MediaMuxer mux;
-        final Object lock;
-        final boolean[] started;
+        final TSMuxer mux;
         final int w, h, dpi;
         MediaCodec encoder;
         VirtualDisplay display;
         Surface input;
-        int track = -1;
         Thread drainThread;
 
-        VideoPipeline(MediaMuxer mux, Object lock, boolean[] started, int w, int h, int dpi) {
+        // SPS/PPS arrive as a codec-config buffer; they must precede the first
+        // frame so VLC can start decoding mid-stream.
+        byte[] codecConfig;
+        final ArrayList<byte[]> pendingData = new ArrayList<>();
+        final ArrayList<Long> pendingPts = new ArrayList<>();
+
+        VideoPipeline(TSMuxer mux, int w, int h, int dpi) {
             this.mux = mux;
-            this.lock = lock;
-            this.started = started;
             this.w = w;
             this.h = h;
             this.dpi = dpi;
@@ -258,16 +272,28 @@ public class StreamService extends Service {
                 while (running) {
                     int idx = encoder.dequeueOutputBuffer(info, 10_000);
                     if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                        synchronized (lock) {
-                            track = mux.addTrack(encoder.getOutputFormat());
-                        }
+                        // Surface-input encoder: format changes carry no data.
                     } else if (idx >= 0) {
                         ByteBuffer b = encoder.getOutputBuffer(idx);
-                        if (b != null && info.size > 0 && started[0] && track >= 0) {
+                        if (b != null && info.size > 0) {
                             b.position(info.offset);
                             b.limit(info.offset + info.size);
-                            synchronized (lock) {
-                                mux.writeSampleData(track, b, info);
+                            byte[] data = new byte[info.size];
+                            b.get(data);
+
+                            if ((info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                                codecConfig = data;
+                                flushPending();
+                            } else if (codecConfig != null) {
+                                flushPending();
+                                mux.writeVideo(data, data.length, info.presentationTimeUs);
+                            } else {
+                                pendingData.add(data);
+                                pendingPts.add(info.presentationTimeUs);
+                                if (pendingData.size() > 90) { // safety valve
+                                    pendingData.clear();
+                                    pendingPts.clear();
+                                }
                             }
                         }
                         encoder.releaseOutputBuffer(idx, false);
@@ -279,6 +305,24 @@ public class StreamService extends Service {
             }
         }
 
+        /** Writes queued frames, prepending SPS/PPS to the first one. */
+        private void flushPending() throws IOException {
+            if (pendingData.isEmpty() || codecConfig == null) return;
+            for (int i = 0; i < pendingData.size(); i++) {
+                byte[] frame = pendingData.get(i);
+                long pts = pendingPts.get(i);
+                if (i == 0) {
+                    byte[] first = new byte[codecConfig.length + frame.length];
+                    System.arraycopy(codecConfig, 0, first, 0, codecConfig.length);
+                    System.arraycopy(frame, 0, first, codecConfig.length, frame.length);
+                    frame = first;
+                }
+                mux.writeVideo(frame, frame.length, pts);
+            }
+            pendingData.clear();
+            pendingPts.clear();
+        }
+
         void stop() {
             try { if (display != null) display.release(); } catch (Exception ignored) { }
             try { if (input != null) input.release(); } catch (Exception ignored) { }
@@ -288,23 +332,18 @@ public class StreamService extends Service {
         }
     }
 
-    // ── Audio pipeline (playback capture → AAC) ─────────────────────────────
+    // ── Audio pipeline (playback capture → AAC → TSMuxer) ───────────────────
 
     private final class AudioPipeline {
-        final MediaMuxer mux;
-        final Object lock;
-        final boolean[] started;
+        final TSMuxer mux;
         AudioRecord record;
         MediaCodec encoder;
-        int track = -1;
         Thread feedThread;
         Thread drainThread;
         volatile boolean stopping;
 
-        AudioPipeline(MediaMuxer mux, Object lock, boolean[] started) {
+        AudioPipeline(TSMuxer mux) {
             this.mux = mux;
-            this.lock = lock;
-            this.started = started;
         }
 
         void start() {
@@ -363,8 +402,8 @@ public class StreamService extends Service {
                     ByteBuffer in = encoder.getInputBuffer(idx);
                     if (in == null) continue;
 
-                    buf.position(n);
-                    buf.flip();
+                    buf.position(0);
+                    buf.limit(n);
                     in.clear();
                     in.put(buf);
 
@@ -388,17 +427,18 @@ public class StreamService extends Service {
                 while (running && !stopping) {
                     int idx = encoder.dequeueOutputBuffer(info, 10_000);
                     if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                        synchronized (lock) {
-                            track = mux.addTrack(encoder.getOutputFormat());
-                        }
+                        // Format is known: AAC-LC 44.1 kHz stereo (matches the config).
                     } else if (idx >= 0) {
                         ByteBuffer b = encoder.getOutputBuffer(idx);
-                        if (b != null && info.size > 0 && started[0] && track >= 0) {
+                        if (b != null && info.size > 0
+                                && (info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
                             b.position(info.offset);
                             b.limit(info.offset + info.size);
-                            synchronized (lock) {
-                                mux.writeSampleData(track, b, info);
-                            }
+                            byte[] frame = new byte[info.size];
+                            b.get(frame);
+
+                            mux.writeAudio(addAdtsHeader(frame, frame.length), frame.length + 7,
+                                    info.presentationTimeUs);
                         }
                         encoder.releaseOutputBuffer(idx, false);
                         if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break;
@@ -407,6 +447,23 @@ public class StreamService extends Service {
             } catch (Throwable ignored) {
                 // Client disconnected or service stopping.
             }
+        }
+
+        /** 7-byte ADTS header for AAC-LC, 44.1 kHz, stereo (no CRC). */
+        private static byte[] addAdtsHeader(byte[] frame, int esLen) {
+            int len = esLen + 7;
+            byte[] h = new byte[7];
+            h[0] = (byte) 0xFF;
+            h[1] = (byte) 0xF1;               // MPEG-4, no CRC
+            h[2] = (byte) 0x50;               // profile AAC-LC, 44.1 kHz, ch upper bit
+            h[3] = (byte) (0x80 | ((len >> 11) & 0x03)); // stereo bit | length[13:11]
+            h[4] = (byte) ((len >> 3) & 0xFF);
+            h[5] = (byte) (((len & 0x07) << 5) | 0x1F);
+            h[6] = (byte) 0xFC;
+            byte[] out = new byte[len];
+            System.arraycopy(h, 0, out, 0, 7);
+            System.arraycopy(frame, 0, out, 7, esLen);
+            return out;
         }
 
         void stop() {
