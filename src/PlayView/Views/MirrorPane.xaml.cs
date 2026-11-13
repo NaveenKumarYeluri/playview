@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
@@ -20,9 +21,12 @@ public partial class MirrorPane : UserControl
     private IntPtr _scrcpyHwnd;
     private DispatcherTimer? _livenessTimer;
     private DispatcherTimer? _sizeTimer;
-    private double _phoneAspect;   // width / height, captured once at launch
+    private double _phoneAspect;   // width / height, from the device's real resolution
     private int _lastAppliedW;
     private int _lastAppliedH;
+    private int _lastAppliedX;
+    private int _lastAppliedY;
+    private bool _embedded;
 
     public MirrorPane()
     {
@@ -149,8 +153,16 @@ public partial class MirrorPane : UserControl
 
         if (_scrcpyProcess is { HasExited: false })
         {
-            StatusMessage = "A mirror session is already running — stop it first.";
-            return;
+            if (_embedded)
+            {
+                StatusMessage = "A mirror session is already running — stop it first.";
+                return;
+            }
+
+            // A previous session started but never embedded — clean it up and go again.
+            try { _scrcpyProcess.Kill(true); } catch { /* already gone */ }
+            _scrcpyProcess = null;
+            await CleanupStaleSessionAsync();
         }
 
         // Self-healing relaunch: close any leftover mirror window and kill stray
@@ -179,6 +191,8 @@ public partial class MirrorPane : UserControl
         var pane = GetPanePixelSize();
         var baseArgs = $"-s {selected.Serial} --window-title {WindowName} --window-borderless" +
                        $" --window-width {pane.Width} --window-height {pane.Height}";
+        if (SoftwareRenderCheck.IsChecked == true)
+            baseArgs += " --render-driver=software";
         if (!string.IsNullOrWhiteSpace(ExtraArgsBox.Text)) baseArgs += " " + ExtraArgsBox.Text.Trim();
 
         string lastError = "";
@@ -186,6 +200,14 @@ public partial class MirrorPane : UserControl
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
+            // Get the phone's true resolution + orientation right before each attempt,
+            // so the letterbox uses the device aspect — not our requested window size.
+            var screen = await GetDeviceScreenAsync();
+            if (screen != null)
+                _phoneAspect = screen.Orientation % 2 == 0
+                    ? (double)screen.W / screen.H
+                    : (double)screen.H / screen.W;
+
             StatusMessage = attempt == 1
                 ? "Starting mirror on " + selected.Description + "…"
                 : $"Retrying ({attempt}/{maxAttempts}) — the previous session is still releasing the phone…";
@@ -217,10 +239,14 @@ public partial class MirrorPane : UserControl
                 if (_scrcpyProcess.HasExited) break;
 
                 var hwnd = Native.FindWindowW(null, WindowName);
+                if (hwnd == IntPtr.Zero)
+                    hwnd = Native.FindWindowW("SDL_app", null); // fallback: scrcpy's window class
+
                 if (hwnd != IntPtr.Zero)
                 {
-                    // Capture the phone screen aspect once, before any of our resizing.
-                    if (Native.GetWindowRect(hwnd, out var wr) && wr.Right > wr.Left && wr.Bottom > wr.Top)
+                    // Prefer the device aspect; only use the window rect as a fallback.
+                    if (_phoneAspect <= 0 && Native.GetWindowRect(hwnd, out var wr)
+                        && wr.Right > wr.Left && wr.Bottom > wr.Top)
                         _phoneAspect = (double)(wr.Right - wr.Left) / (wr.Bottom - wr.Top);
 
                     await EmbedMirrorAsync(hwnd);
@@ -303,13 +329,17 @@ public partial class MirrorPane : UserControl
 
         if (MirrorHost.ChildHwnd == IntPtr.Zero)
         {
-            StatusMessage = "Mirror started but could not be embedded — look for a separate scrcpy window.";
+            AppendMirrorLog("embed failed: host window never materialised");
+            StopMirrorCore();
+            _ = KillDeviceServerAsync();
+            ResetMirrorUi("Mirror could not be embedded into the pane — press Launch again.");
             return;
         }
 
         Native.SetParent(hwnd, MirrorHost.ChildHwnd);
         ResizeMirror();
         Native.ShowWindow(hwnd, Native.SW_SHOW);
+        _embedded = true;
 
         StartLivenessWatch();
         StartSizeSync();
@@ -358,9 +388,21 @@ public partial class MirrorPane : UserControl
 
         var x = Math.Max(0, (hostWidth - width) / 2);
         var y = Math.Max(0, (hostHeight - height) / 2);
+
+        // Skip no-op moves — constantly repainting the same rect is what leaves
+        // stale pixel trails (ghosting) behind.
+        if (width == _lastAppliedW && height == _lastAppliedH
+            && x == _lastAppliedX && y == _lastAppliedY)
+        {
+            MirrorTitleText.Text = $"Mirroring — phone screen {width}×{height} in pane {hostWidth}×{hostHeight}";
+            return;
+        }
+
         Native.MoveWindow(_scrcpyHwnd, x, y, width, height, true);
         _lastAppliedW = width;
         _lastAppliedH = height;
+        _lastAppliedX = x;
+        _lastAppliedY = y;
 
         // Live diagnostics so issues are visible in the pane itself.
         MirrorTitleText.Text = $"Mirroring — phone screen {width}×{height} in pane {hostWidth}×{hostHeight}";
@@ -409,36 +451,55 @@ public partial class MirrorPane : UserControl
     private async void OnBackKey(object sender, RoutedEventArgs e) => await SendKeyEvent(4);
     private async void OnHomeKey(object sender, RoutedEventArgs e) => await SendKeyEvent(3);
 
+    private sealed record DeviceScreen(int W, int H, int Orientation);
+
+    /// <summary>Real device resolution + current orientation, queried over adb.</summary>
+    private async Task<DeviceScreen?> GetDeviceScreenAsync()
+    {
+        if (_adb == null) return null;
+        try
+        {
+            var sizeOut = await ScrcpyService.RunAdbAsync(_adb, "shell wm size");
+            var match = Regex.Match(sizeOut, @"(\d+)x(\d+)");
+            if (!match.Success) return null;
+            var w = int.Parse(match.Groups[1].Value);
+            var h = int.Parse(match.Groups[2].Value);
+            if (w <= 0 || h <= 0) return null;
+
+            // SurfaceOrientation: 0 = portrait, 1/3 = landscape
+            var orientOut = await ScrcpyService.RunAdbAsync(_adb, "shell dumpsys input | grep SurfaceOrientation");
+            var orientMatch = Regex.Match(orientOut, @"SurfaceOrientation\s*:\s*(\d)");
+            var orientation = orientMatch.Success ? int.Parse(orientMatch.Groups[1].Value) : 0;
+
+            return new DeviceScreen(w, h, orientation);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private async void OnTapCenter(object sender, RoutedEventArgs e)
     {
         if (_adb == null || _scrcpyProcess is not { HasExited: false }) return;
 
+        var screen = await GetDeviceScreenAsync();
+        if (screen == null) return;
+
+        int centerX, centerY;
+        if (screen.Orientation % 2 == 0)
+        {
+            centerX = screen.W / 2;
+            centerY = screen.H / 2;
+        }
+        else
+        {
+            centerX = screen.H / 2;
+            centerY = screen.W / 2;
+        }
+
         try
         {
-            var sizeOut = await ScrcpyService.RunAdbAsync(_adb, "shell wm size");
-            var match = System.Text.RegularExpressions.Regex.Match(sizeOut, @"(\d+)x(\d+)");
-            if (!match.Success) return;
-            var width = int.Parse(match.Groups[1].Value);
-            var height = int.Parse(match.Groups[2].Value);
-
-            // SurfaceOrientation: 0 = portrait, 1/3 = landscape
-            var orientOut = await ScrcpyService.RunAdbAsync(_adb, "shell dumpsys input | grep SurfaceOrientation");
-            var orientation = 0;
-            var orientMatch = System.Text.RegularExpressions.Regex.Match(orientOut, @"SurfaceOrientation\s*:\s*(\d)");
-            if (orientMatch.Success) orientation = int.Parse(orientMatch.Groups[1].Value);
-
-            int centerX, centerY;
-            if (orientation % 2 == 0)
-            {
-                centerX = width / 2;
-                centerY = height / 2;
-            }
-            else
-            {
-                centerX = height / 2;
-                centerY = width / 2;
-            }
-
             await ScrcpyService.RunAdbAsync(_adb, $"shell input tap {centerX} {centerY}");
         }
         catch
@@ -504,6 +565,9 @@ public partial class MirrorPane : UserControl
         _phoneAspect = 0;
         _lastAppliedW = 0;
         _lastAppliedH = 0;
+        _lastAppliedX = 0;
+        _lastAppliedY = 0;
+        _embedded = false;
 
         _livenessTimer?.Stop();
         _sizeTimer?.Stop();
