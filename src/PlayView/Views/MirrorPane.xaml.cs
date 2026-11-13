@@ -307,19 +307,15 @@ public partial class MirrorPane : UserControl
     {
         _scrcpyHwnd = hwnd;
 
-        // Keep scrcpy's own top-level window so its renderer runs exactly like a
-        // plain scrcpy session (no cross-process child-window artifacts). Instead:
-        // borderless tool window, owned by our main window, glued over the pane.
-        var owner = GetOwnerHwnd();
-        if (owner != IntPtr.Zero)
-            Native.SetWindowLongPtrW(hwnd, Native.GWL_HWNDPARENT, owner);
-
-        long exStyle = Native.GetWindowLongPtrW(hwnd, Native.GWL_EXSTYLE).ToInt64();
-        exStyle |= Native.WS_EX_TOOLWINDOW;
-        Native.SetWindowLongPtrW(hwnd, Native.GWL_EXSTYLE, new IntPtr(exStyle));
-
+        // scrcpy's window is used EXACTLY as scrcpy created it — no style, owner
+        // or ex-style changes. Altering a window after creation makes DWM
+        // composite it badly (blended ghost frames). Instead we glue it directly
+        // above our main window in z-order, over the pane area.
         MirrorSetup.Visibility = Visibility.Collapsed;
         MirrorPanel.Visibility = Visibility.Visible;
+
+        // Hide the natural-size window while we compute its final spot (no flash).
+        Native.ShowWindow(hwnd, Native.SW_HIDE);
 
         // Wait until the pane area has a real size to glue the window over.
         for (var i = 0; i < 100 && MirrorHost.ActualWidth < 10; i++)
@@ -358,7 +354,30 @@ public partial class MirrorPane : UserControl
         _windowHooked = true;
         win.LocationChanged += (_, _) => RepositionSoon();
         win.SizeChanged += (_, _) => RepositionSoon();
-        win.StateChanged += (_, _) => RepositionSoon();
+        win.Activated += (_, _) => EnsureMirrorAboveOwner();
+        win.StateChanged += (_, _) =>
+        {
+            if (!_embedded || _scrcpyHwnd == IntPtr.Zero || win == null) return;
+
+            if (win.WindowState == WindowState.Minimized)
+                Native.ShowWindow(_scrcpyHwnd, Native.SW_HIDE);
+            else
+            {
+                Native.ShowWindow(_scrcpyHwnd, Native.SW_SHOWNA);
+                RepositionSoon();
+            }
+        };
+    }
+
+    /// <summary>Keeps the mirror directly above our window in z-order (clicking our window re-glues it).</summary>
+    private void EnsureMirrorAboveOwner()
+    {
+        if (!_embedded || _scrcpyHwnd == IntPtr.Zero) return;
+        var owner = GetOwnerHwnd();
+        if (owner == IntPtr.Zero) return;
+
+        Native.SetWindowPos(_scrcpyHwnd, owner, 0, 0, 0, 0,
+            Native.SWP_NOACTIVATE | Native.SWP_NOMOVE | Native.SWP_NOSIZE);
     }
 
     /// <summary>Repositions the floating mirror after any move/resize, batched per layout pass.</summary>
@@ -427,8 +446,8 @@ public partial class MirrorPane : UserControl
             return;
         }
 
-        Native.SetWindowPos(_scrcpyHwnd, IntPtr.Zero, x, y, width, height,
-            Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+        Native.SetWindowPos(_scrcpyHwnd, GetOwnerHwnd(), x, y, width, height,
+            Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
         _lastAppliedW = width;
         _lastAppliedH = height;
         _lastAppliedX = x;
