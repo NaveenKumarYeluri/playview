@@ -75,19 +75,33 @@ public partial class MainWindow : Window
         foreach (var button in Sidebar.Children.OfType<RadioButton>())
             button.IsChecked = (string?)button.Tag == id;
 
-        PlayerView.Visibility = id == "local" ? Visibility.Visible : Visibility.Collapsed;
-        MirrorView.Visibility = id == "mirror" ? Visibility.Visible : Visibility.Collapsed;
-
-        if (id is "local" or "mirror")
+        // LibVLCSharp.WPF renders video through a floating overlay window that stays
+        // on top of everything inside the app while the VideoView remains in the tree,
+        // even when hidden — it swallows mouse clicks over the whole content area.
+        // So the player pane is fully detached when another pane is active.
+        if (id == "local")
         {
+            if (!PaneGrid.Children.Contains(PlayerView)) PaneGrid.Children.Add(PlayerView);
+            PlayerView.Visibility = Visibility.Visible;
+            MirrorView.Visibility = Visibility.Collapsed;
             OttHost.Visibility = Visibility.Collapsed;
         }
         else
         {
-            var pane = GetOrCreateOttPane(id);
-            OttHost.Content = pane;
-            OttHost.Visibility = Visibility.Visible;
-            _ = pane.EnsureInitializedAsync();
+            PaneGrid.Children.Remove(PlayerView);
+            MirrorView.Visibility = id == "mirror" ? Visibility.Visible : Visibility.Collapsed;
+
+            if (id == "mirror")
+            {
+                OttHost.Visibility = Visibility.Collapsed;
+            }
+            else
+            {
+                var pane = GetOrCreateOttPane(id);
+                OttHost.Content = pane;
+                OttHost.Visibility = Visibility.Visible;
+                _ = pane.EnsureInitializedAsync();
+            }
         }
 
         TransportBar.Visibility = id == "local" ? Visibility.Visible : Visibility.Collapsed;

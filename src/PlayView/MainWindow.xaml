@@ -71,7 +71,7 @@
         </ScrollViewer>
       </Border>
 
-      <Grid Grid.Column="1">
+      <Grid x:Name="PaneGrid" Grid.Column="1">
         <views:PlayerPane x:Name="PlayerView"/>
         <ContentControl x:Name="OttHost"/>
         <views:MirrorPane x:Name="MirrorView"/>

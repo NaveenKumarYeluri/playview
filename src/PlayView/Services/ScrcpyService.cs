@@ -9,17 +9,32 @@ public static class ScrcpyService
 {
     public static string? FindScrcpy(string configured, string exeDir)
     {
+        // Explicitly configured path (file or folder containing scrcpy.exe)
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            if (File.Exists(configured)) return configured;
+            var inConfiguredDir = Path.Combine(configured, "scrcpy.exe");
+            if (Directory.Exists(configured) && File.Exists(inConfiguredDir)) return inConfiguredDir;
+        }
+
         var candidates = new[]
         {
-            configured,
             Path.Combine(exeDir, "tools", "scrcpy", "scrcpy.exe"),
+            Path.Combine(exeDir, "tools", "scrcpy.exe"),
+            Path.Combine(exeDir, "tools", "current", "scrcpy.exe"),
             Path.Combine(exeDir, "scrcpy.exe"),
         };
 
         foreach (var path in candidates)
         {
-            if (!string.IsNullOrWhiteSpace(path) && File.Exists(path)) return path;
+            if (File.Exists(path)) return path;
         }
+
+        // winget portable installs expose a shim in %LOCALAPPDATA%\Microsoft\WinGet\Links
+        var wingetShim = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Microsoft", "WinGet", "Links", "scrcpy.exe");
+        if (File.Exists(wingetShim)) return wingetShim;
 
         return FindOnPath("scrcpy.exe");
     }
