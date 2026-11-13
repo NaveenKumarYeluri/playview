@@ -49,20 +49,20 @@ public partial class MainWindow : Window
 
     private void BuildSidebar()
     {
-        AddSideItem("Local Player", "local");
+        AddSideItem("Local Player", "local", "▶");
         AddSideSeparator();
         foreach (var service in _settings.Services.Where(s => s.Enabled))
-            AddSideItem(service.Name, service.Id);
+            AddSideItem(service.Name, service.Id, service.Name[..1].ToUpper());
         AddSideSeparator();
-        AddSideItem("Phone Mirror", "mirror");
+        AddSideItem("Phone Mirror", "mirror", "📱");
     }
 
-    private void AddSideItem(string label, string id)
+    private void AddSideItem(string label, string id, string glyph)
     {
         var button = new RadioButton
         {
             Style = (Style)FindResource("SideItem"),
-            Content = label,
+            Content = glyph + "  " + label,
             Tag = id,
             GroupName = "panes",
         };
