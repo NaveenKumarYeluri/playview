@@ -38,7 +38,11 @@ public partial class MainWindow : Window
         _uiTimer.Start();
 
         PreviewKeyDown += OnPreviewKeyDown;
-        Closed += (_, _) => PlayerView.Shutdown();
+        Closed += (_, _) =>
+        {
+            PlayerView.Shutdown();
+            MirrorView.ShutdownMirror();
+        };
     }
 
     // ── Sidebar ─────────────────────────────────────────────────────────────

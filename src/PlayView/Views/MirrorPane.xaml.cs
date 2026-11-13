@@ -1,6 +1,7 @@
-using System.IO;
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using Microsoft.Win32;
 using PlayView.Services;
 
@@ -8,14 +9,26 @@ namespace PlayView.Views;
 
 public partial class MirrorPane : UserControl
 {
+    private const string WindowName = "PlayViewMirror";
+
     private AppSettings _settings = new();
     private string? _scrcpy;
     private string? _adb;
+
+    private Process? _scrcpyProcess;
+    private Task<string>? _stderrTask;
+    private IntPtr _scrcpyHwnd;
+    private DispatcherTimer? _livenessTimer;
 
     public MirrorPane()
     {
         InitializeComponent();
         Loaded += async (_, _) => await RefreshAsync();
+        MirrorHost.SizeChanged += (_, _) => ResizeMirror();
+
+        // The embedded scrcpy window is a native child HWND — WPF's Visibility
+        // does not hide it, so mirror it to the pane's visibility explicitly.
+        IsVisibleChanged += OnPaneVisibilityChanged;
     }
 
     public void Initialize(AppSettings settings)
@@ -23,6 +36,16 @@ public partial class MirrorPane : UserControl
         _settings = settings;
         ScrcpyPathBox.Text = settings.ScrcpyPath;
     }
+
+    // ── Visibility plumbing ──────────────────────────────────────────────
+
+    private void OnPaneVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (_scrcpyHwnd != IntPtr.Zero)
+            Native.ShowWindow(_scrcpyHwnd, (bool)e.NewValue ? Native.SW_SHOW : Native.SW_HIDE);
+    }
+
+    // ── Device refresh ───────────────────────────────────────────────────
 
     private async void OnRefresh(object sender, RoutedEventArgs e) => await RefreshAsync();
 
@@ -34,7 +57,7 @@ public partial class MirrorPane : UserControl
         if (_scrcpy == null)
         {
             StatusText.Text = "scrcpy not found. Install it (winget install scrcpy), " +
-                              "or drop it into a tools\\scrcpy folder next to PlayView.exe, or set the path below.";
+                              "or drop it into a tools folder next to PlayView.exe, or set the path below.";
             LaunchBtn.IsEnabled = false;
             RefreshBtn.IsEnabled = true;
             return;
@@ -63,20 +86,216 @@ public partial class MirrorPane : UserControl
         RefreshBtn.IsEnabled = true;
     }
 
-    private void OnLaunch(object sender, RoutedEventArgs e)
-    {
-        if (_scrcpy == null) return;
+    // ── Launch + embed ───────────────────────────────────────────────────
 
-        var serial = (DeviceList.SelectedItem as ScrcpyDevice)?.Serial;
+    private async void OnLaunch(object sender, RoutedEventArgs e)
+    {
+        if (_scrcpy == null || _adb == null)
+        {
+            await RefreshAsync();
+            if (_scrcpy == null) return;
+        }
+
+        if (_scrcpyProcess is { HasExited: false })
+        {
+            StatusText.Text = "A mirror session is already running — stop it first.";
+            return;
+        }
+
+        var selected = DeviceList.SelectedItem as ScrcpyDevice;
+        if (selected == null && DeviceList.ItemsSource is List<ScrcpyDevice> devices && devices.Count == 1)
+            selected = devices[0];
+        if (selected == null)
+        {
+            StatusText.Text = "Select a device (click Refresh) or connect your phone.";
+            return;
+        }
+        if (selected.State != "device")
+        {
+            StatusText.Text = "Device not ready: " + selected.Description;
+            return;
+        }
+
+        LaunchBtn.IsEnabled = false;
+        StatusText.Text = "Starting mirror on " + selected.Description + "…";
+
+        var args = $"-s {selected.Serial} --window-title {WindowName} --window-borderless";
+        if (!string.IsNullOrWhiteSpace(ExtraArgsBox.Text)) args += " " + ExtraArgsBox.Text.Trim();
+
         try
         {
-            ScrcpyService.Launch(_scrcpy, serial, ExtraArgsBox.Text);
-            StatusText.Text = "Mirror launched. Close the scrcpy window when you're done.";
+            _scrcpyProcess = Process.Start(new ProcessStartInfo(_scrcpy, args)
+            {
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            });
+            _stderrTask = _scrcpyProcess!.StandardError.ReadToEndAsync();
         }
         catch (Exception ex)
         {
-            StatusText.Text = "Failed to launch scrcpy: " + ex.Message;
+            StatusText.Text = "Failed to start scrcpy: " + ex.Message;
+            LaunchBtn.IsEnabled = true;
+            return;
         }
+
+        // Wait for scrcpy's window to appear, then embed it into this pane.
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (_scrcpyProcess.HasExited) break;
+
+            var hwnd = Native.FindWindowW(null, WindowName);
+            if (hwnd != IntPtr.Zero)
+            {
+                await EmbedMirrorAsync(hwnd);
+                LaunchBtn.IsEnabled = true;
+                return;
+            }
+
+            await Task.Delay(250);
+        }
+
+        LaunchBtn.IsEnabled = true;
+
+        if (_scrcpyProcess.HasExited)
+        {
+            string output = "";
+            if (_stderrTask != null)
+            {
+                await Task.WhenAny(_stderrTask, Task.Delay(1000));
+                if (_stderrTask.Status == TaskStatus.RanToCompletion) output = _stderrTask.Result;
+            }
+
+            StatusText.Text = "scrcpy exited before mirroring started." +
+                (string.IsNullOrWhiteSpace(output) ? "" : "\n\n" + TrimOutput(output));
+        }
+        else
+        {
+            StatusText.Text = "Timed out waiting for the mirror window. Try Launch again.";
+        }
+    }
+
+    private async Task EmbedMirrorAsync(IntPtr hwnd)
+    {
+        _scrcpyHwnd = hwnd;
+
+        // Strip scrcpy's window chrome and turn it into a child of our pane.
+        long style = Native.GetWindowLongPtrW(hwnd, Native.GWL_STYLE).ToInt64();
+        style &= ~(Native.WS_POPUP | Native.WS_CAPTION | Native.WS_THICKFRAME | Native.WS_SYSMENU
+                   | Native.WS_MINIMIZEBOX | Native.WS_MAXIMIZEBOX);
+        style |= Native.WS_CHILD | Native.WS_VISIBLE;
+        Native.SetWindowLongPtrW(hwnd, Native.GWL_STYLE, new IntPtr(style));
+
+        MirrorSetup.Visibility = Visibility.Collapsed;
+        MirrorPanel.Visibility = Visibility.Visible;
+
+        // The HwndHost only creates its HWND once it has been laid out.
+        for (var i = 0; i < 100 && MirrorHost.ChildHwnd == IntPtr.Zero; i++)
+            await Task.Delay(50);
+
+        if (MirrorHost.ChildHwnd == IntPtr.Zero)
+        {
+            StatusText.Text = "Mirror started but could not be embedded — look for a separate scrcpy window.";
+            return;
+        }
+
+        Native.SetParent(hwnd, MirrorHost.ChildHwnd);
+        ResizeMirror();
+        Native.ShowWindow(hwnd, Native.SW_SHOW);
+
+        StartLivenessWatch();
+        StatusText.Text = "Mirror embedded — click the phone screen to interact, type with your laptop keyboard.";
+    }
+
+    private void ResizeMirror()
+    {
+        if (_scrcpyHwnd == IntPtr.Zero || MirrorHost.ChildHwnd == IntPtr.Zero) return;
+        if (Native.GetClientRect(MirrorHost.ChildHwnd, out var rect))
+            Native.MoveWindow(_scrcpyHwnd, 0, 0, rect.Right - rect.Left, rect.Bottom - rect.Top, true);
+    }
+
+    private void StartLivenessWatch()
+    {
+        _livenessTimer?.Stop();
+        _livenessTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _livenessTimer.Tick += (_, _) =>
+        {
+            if (_scrcpyProcess is { HasExited: true })
+            {
+                _livenessTimer?.Stop();
+                ResetMirrorUi("Mirror ended (phone disconnected or scrcpy closed).");
+            }
+        };
+        _livenessTimer.Start();
+    }
+
+    // ── Stop / teardown ──────────────────────────────────────────────────
+
+    private void OnStopMirror(object sender, RoutedEventArgs e) => StopMirror();
+
+    private void OnBackToSetup(object sender, RoutedEventArgs e)
+    {
+        // Keep the mirror running; just show the setup controls again.
+        MirrorSetup.Visibility = Visibility.Visible;
+    }
+
+    private void StopMirror()
+    {
+        if (_scrcpyHwnd != IntPtr.Zero)
+            Native.PostMessageW(_scrcpyHwnd, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+
+        var process = _scrcpyProcess;
+        if (process is { HasExited: false })
+        {
+            var killer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+            killer.Tick += (_, _) =>
+            {
+                killer.Stop();
+                try { if (!process.HasExited) process.Kill(true); } catch { /* already gone */ }
+            };
+            killer.Start();
+        }
+
+        _livenessTimer?.Stop();
+        ResetMirrorUi("Mirror stopped.");
+    }
+
+    private void ResetMirrorUi(string message)
+    {
+        _scrcpyHwnd = IntPtr.Zero;
+        _scrcpyProcess = null;
+        _stderrTask = null;
+
+        MirrorPanel.Visibility = Visibility.Collapsed;
+        MirrorSetup.Visibility = Visibility.Visible;
+        StatusText.Text = message;
+
+        if (_adb != null) _ = RefreshAsync();
+    }
+
+    public void ShutdownMirror()
+    {
+        try
+        {
+            if (_scrcpyHwnd != IntPtr.Zero)
+                Native.PostMessageW(_scrcpyHwnd, Native.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+        }
+        catch { /* window already gone */ }
+
+        try
+        {
+            if (_scrcpyProcess is { HasExited: false }) _scrcpyProcess.Kill(true);
+        }
+        catch { /* already gone */ }
+    }
+
+    // ── Path / Wi-Fi helpers ─────────────────────────────────────────────
+
+    private static string TrimOutput(string output)
+    {
+        output = output.Trim();
+        return output.Length <= 800 ? output : output[^800..];
     }
 
     private void OnBrowse(object sender, RoutedEventArgs e)
