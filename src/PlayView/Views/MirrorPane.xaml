@@ -24,8 +24,13 @@
         <TextBlock Text="scrcpy not installed? Install it with:  winget install scrcpy" Foreground="{StaticResource Brush.SubText}"
                    FontSize="12" Margin="0,10,0,0" TextWrapping="Wrap"/>
 
-        <Button x:Name="RefreshBtn" Style="{StaticResource PaneButton}" Content="Refresh devices"
-                Click="OnRefresh" Margin="0,18,0,0" HorizontalAlignment="Left"/>
+        <StackPanel Orientation="Horizontal" Margin="0,18,0,0">
+          <Button x:Name="RefreshBtn" Style="{StaticResource PaneButton}" Content="Refresh devices"
+                  Click="OnRefresh"/>
+          <Button x:Name="ReturnBtn" Style="{StaticResource PaneButton}" Content="Return to mirror"
+                  Click="OnReturnToMirror" Margin="8,0,0,0" Visibility="Collapsed"
+                  ToolTip="Show the running mirror again"/>
+        </StackPanel>
 
         <TextBlock Text="Connected devices" Foreground="{StaticResource Brush.Text}" FontSize="13" Margin="0,14,0,4"/>
         <ListBox x:Name="DeviceList" Height="130" BorderThickness="1" BorderBrush="{StaticResource Brush.Border}"

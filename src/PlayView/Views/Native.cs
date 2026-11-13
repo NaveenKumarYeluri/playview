@@ -5,6 +5,8 @@ namespace PlayView.Views;
 internal static class Native
 {
     public const int GWL_STYLE = -16;
+    public const int GWL_HWNDPARENT = -8;
+    public const int GWL_EXSTYLE = -20;
     public const long WS_CHILD = 0x40000000L;
     public const long WS_VISIBLE = 0x10000000L;
     public const long WS_POPUP = 0x80000000L;
@@ -13,12 +15,22 @@ internal static class Native
     public const long WS_SYSMENU = 0x00080000L;
     public const long WS_MINIMIZEBOX = 0x00020000L;
     public const long WS_MAXIMIZEBOX = 0x00010000L;
+    public const long WS_EX_TOOLWINDOW = 0x00000080L;
     public const uint WM_CLOSE = 0x0010;
-
-    public delegate IntPtr WndProc(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
 
     public const int SW_HIDE = 0;
     public const int SW_SHOW = 5;
+    public const int SW_SHOWNA = 8;
+
+    public const uint SWP_NOZORDER = 0x0004;
+    public const uint SWP_NOACTIVATE = 0x0010;
+    public const uint SWP_SHOWWINDOW = 0x0040;
+
+    [DllImport("user32.dll")]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int x, int y, int width, int height, uint flags);
+
+    public delegate IntPtr WndProc(IntPtr hWnd, uint message, IntPtr wParam, IntPtr lParam);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr FindWindowW(string? className, string? windowName);

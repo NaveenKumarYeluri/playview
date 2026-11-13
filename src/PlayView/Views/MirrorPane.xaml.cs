@@ -21,20 +21,25 @@ public partial class MirrorPane : UserControl
     private IntPtr _scrcpyHwnd;
     private DispatcherTimer? _livenessTimer;
     private DispatcherTimer? _sizeTimer;
-    private double _phoneAspect;   // width / height, from the device's real resolution
+    private double _phoneAspect;   // width / height, from scrcpy's natural window size
     private int _lastAppliedW;
     private int _lastAppliedH;
     private int _lastAppliedX;
     private int _lastAppliedY;
     private bool _embedded;
+    private bool _windowHooked;
 
     public MirrorPane()
     {
         InitializeComponent();
-        Loaded += async (_, _) => await RefreshAsync();
-        MirrorHost.SizeChanged += (_, _) => ResizeMirror();
+        Loaded += async (_, _) =>
+        {
+            HookWindowEvents();
+            await RefreshAsync();
+        };
+        MirrorHost.SizeChanged += (_, _) => RepositionSoon();
 
-        // The embedded scrcpy window is a native child HWND — WPF's Visibility
+        // The mirror lives in its own native window — WPF's Visibility
         // does not hide it, so mirror it to the pane's visibility explicitly.
         IsVisibleChanged += OnPaneVisibilityChanged;
     }
@@ -76,8 +81,8 @@ public partial class MirrorPane : UserControl
 
     private void OnPaneVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
-        if (_scrcpyHwnd != IntPtr.Zero)
-            Native.ShowWindow(_scrcpyHwnd, (bool)e.NewValue ? Native.SW_SHOW : Native.SW_HIDE);
+        if (_scrcpyHwnd == IntPtr.Zero) return;
+        Native.ShowWindow(_scrcpyHwnd, (bool)e.NewValue ? Native.SW_SHOWNA : Native.SW_HIDE);
     }
 
     // ── Device refresh ───────────────────────────────────────────────────
@@ -186,11 +191,7 @@ public partial class MirrorPane : UserControl
 
         LaunchBtn.IsEnabled = false;
 
-        // Ask scrcpy itself for a window sized to our pane (DPI-aware device pixels)
-        // so it opens full-size from the start instead of being resized after launch.
-        var pane = GetPanePixelSize();
-        var baseArgs = $"-s {selected.Serial} --window-title {WindowName} --window-borderless" +
-                       $" --window-width {pane.Width} --window-height {pane.Height}";
+        var baseArgs = $"-s {selected.Serial} --window-title {WindowName} --window-borderless";
         if (SoftwareRenderCheck.IsChecked == true)
             baseArgs += " --render-driver=software";
         if (!string.IsNullOrWhiteSpace(ExtraArgsBox.Text)) baseArgs += " " + ExtraArgsBox.Text.Trim();
@@ -200,14 +201,6 @@ public partial class MirrorPane : UserControl
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            // Get the phone's true resolution + orientation right before each attempt,
-            // so the letterbox uses the device aspect — not our requested window size.
-            var screen = await GetDeviceScreenAsync();
-            if (screen != null)
-                _phoneAspect = screen.Orientation % 2 == 0
-                    ? (double)screen.W / screen.H
-                    : (double)screen.H / screen.W;
-
             StatusMessage = attempt == 1
                 ? "Starting mirror on " + selected.Description + "…"
                 : $"Retrying ({attempt}/{maxAttempts}) — the previous session is still releasing the phone…";
@@ -244,8 +237,9 @@ public partial class MirrorPane : UserControl
 
                 if (hwnd != IntPtr.Zero)
                 {
-                    // Prefer the device aspect; only use the window rect as a fallback.
-                    if (_phoneAspect <= 0 && Native.GetWindowRect(hwnd, out var wr)
+                    // Capture the phone aspect from scrcpy's natural window size —
+                    // we pass no --window-… args, so it is the true device ratio.
+                    if (Native.GetWindowRect(hwnd, out var wr)
                         && wr.Right > wr.Left && wr.Bottom > wr.Top)
                         _phoneAspect = (double)(wr.Right - wr.Left) / (wr.Bottom - wr.Top);
 
@@ -313,55 +307,94 @@ public partial class MirrorPane : UserControl
     {
         _scrcpyHwnd = hwnd;
 
-        // Strip scrcpy's window chrome and turn it into a child of our pane.
-        long style = Native.GetWindowLongPtrW(hwnd, Native.GWL_STYLE).ToInt64();
-        style &= ~(Native.WS_POPUP | Native.WS_CAPTION | Native.WS_THICKFRAME | Native.WS_SYSMENU
-                   | Native.WS_MINIMIZEBOX | Native.WS_MAXIMIZEBOX);
-        style |= Native.WS_CHILD | Native.WS_VISIBLE;
-        Native.SetWindowLongPtrW(hwnd, Native.GWL_STYLE, new IntPtr(style));
+        // Keep scrcpy's own top-level window so its renderer runs exactly like a
+        // plain scrcpy session (no cross-process child-window artifacts). Instead:
+        // borderless tool window, owned by our main window, glued over the pane.
+        var owner = GetOwnerHwnd();
+        if (owner != IntPtr.Zero)
+            Native.SetWindowLongPtrW(hwnd, Native.GWL_HWNDPARENT, owner);
+
+        long exStyle = Native.GetWindowLongPtrW(hwnd, Native.GWL_EXSTYLE).ToInt64();
+        exStyle |= Native.WS_EX_TOOLWINDOW;
+        Native.SetWindowLongPtrW(hwnd, Native.GWL_EXSTYLE, new IntPtr(exStyle));
 
         MirrorSetup.Visibility = Visibility.Collapsed;
         MirrorPanel.Visibility = Visibility.Visible;
 
-        // The HwndHost only creates its HWND once it has been laid out.
-        for (var i = 0; i < 100 && MirrorHost.ChildHwnd == IntPtr.Zero; i++)
+        // Wait until the pane area has a real size to glue the window over.
+        for (var i = 0; i < 100 && MirrorHost.ActualWidth < 10; i++)
             await Task.Delay(50);
 
-        if (MirrorHost.ChildHwnd == IntPtr.Zero)
+        if (MirrorHost.ActualWidth < 10)
         {
-            AppendMirrorLog("embed failed: host window never materialised");
+            AppendMirrorLog("embed failed: pane never got a size");
             StopMirrorCore();
             _ = KillDeviceServerAsync();
-            ResetMirrorUi("Mirror could not be embedded into the pane — press Launch again.");
+            ResetMirrorUi("Mirror could not be placed into the pane — press Launch again.");
             return;
         }
 
-        Native.SetParent(hwnd, MirrorHost.ChildHwnd);
-        ResizeMirror();
-        Native.ShowWindow(hwnd, Native.SW_SHOW);
+        PositionFloatingMirror();
         _embedded = true;
 
         StartLivenessWatch();
         StartSizeSync();
-        AppendMirrorLog($"embedded: phone {_lastAppliedW}x{_lastAppliedH}, aspect {_phoneAspect:F3}");
+        AppendMirrorLog($"embedded (floating): phone {_lastAppliedW}x{_lastAppliedH}, aspect {_phoneAspect:F3}");
         StatusMessage = "Mirror embedded — use the media buttons above to control playback from the laptop.";
     }
 
-    private void ResizeMirror()
+    private IntPtr GetOwnerHwnd()
     {
-        if (_scrcpyHwnd == IntPtr.Zero || MirrorHost.ChildHwnd == IntPtr.Zero) return;
-        if (!Native.GetClientRect(MirrorHost.ChildHwnd, out var client)) return;
+        var win = Window.GetWindow(this);
+        return win == null ? IntPtr.Zero : new System.Windows.Interop.WindowInteropHelper(win).Handle;
+    }
 
-        var hostWidth = client.Right - client.Left;
-        var hostHeight = client.Bottom - client.Top;
-        if (hostWidth <= 0 || hostHeight <= 0) return;
+    private void HookWindowEvents()
+    {
+        if (_windowHooked) return;
+        var win = Window.GetWindow(this);
+        if (win == null) return;
+
+        _windowHooked = true;
+        win.LocationChanged += (_, _) => RepositionSoon();
+        win.SizeChanged += (_, _) => RepositionSoon();
+        win.StateChanged += (_, _) => RepositionSoon();
+    }
+
+    /// <summary>Repositions the floating mirror after any move/resize, batched per layout pass.</summary>
+    private void RepositionSoon()
+    {
+        if (_scrcpyHwnd == IntPtr.Zero) return;
+        Dispatcher.InvokeAsync(PositionFloatingMirror, DispatcherPriority.Loaded);
+    }
+
+    private void PositionFloatingMirror()
+    {
+        if (_scrcpyHwnd == IntPtr.Zero || !_embedded) return;
+
+        var paneW = MirrorHost.ActualWidth;
+        var paneH = MirrorHost.ActualHeight;
+        if (paneW < 10 || paneH < 10) return;
+        if (_phoneAspect <= 0) return;
+
+        // Pane area in physical screen pixels (PointToScreen is DPI-aware).
+        var topLeft = MirrorHost.PointToScreen(new Point(0, 0));
+        var dpi = 1.0;
+        var source = PresentationSource.FromVisual(this);
+        if (source?.CompositionTarget != null)
+            dpi = source.CompositionTarget.TransformToDevice.M11;
+
+        var panePixelW = (int)Math.Round(paneW * dpi);
+        var panePixelH = (int)Math.Round(paneH * dpi);
+        var paneX = (int)topLeft.X;
+        var paneY = (int)topLeft.Y;
 
         // Detect self-resizes by scrcpy (e.g. phone rotation) and adopt the new aspect.
-        if (Native.GetWindowRect(_scrcpyHwnd, out var current))
+        if (Native.GetWindowRect(_scrcpyHwnd, out var current) && _lastAppliedW > 0)
         {
             var curW = current.Right - current.Left;
             var curH = current.Bottom - current.Top;
-            if (curW > 0 && curH > 0 && _lastAppliedW > 0)
+            if (curW > 0 && curH > 0)
             {
                 var devW = Math.Abs(curW - _lastAppliedW) / (double)_lastAppliedW;
                 var devH = Math.Abs(curH - _lastAppliedH) / (double)_lastAppliedH;
@@ -370,61 +403,46 @@ public partial class MirrorPane : UserControl
             }
         }
 
-        // Fit the captured phone aspect into the pane, centred, VLC letterbox style.
-        var aspect = _phoneAspect;
-        if (aspect <= 0) return;
-
+        // Fit the phone aspect into the pane, centred — VLC letterbox style.
         int width, height;
-        if (hostWidth / (double)hostHeight > aspect)
+        if (panePixelW / (double)panePixelH > _phoneAspect)
         {
-            height = hostHeight;
-            width = (int)(hostHeight * aspect);
+            height = panePixelH;
+            width = (int)(panePixelH * _phoneAspect);
         }
         else
         {
-            width = hostWidth;
-            height = (int)(hostWidth / aspect);
+            width = panePixelW;
+            height = (int)(panePixelW / _phoneAspect);
         }
 
-        var x = Math.Max(0, (hostWidth - width) / 2);
-        var y = Math.Max(0, (hostHeight - height) / 2);
+        var x = paneX + Math.Max(0, (panePixelW - width) / 2);
+        var y = paneY + Math.Max(0, (panePixelH - height) / 2);
 
-        // Skip no-op moves — constantly repainting the same rect is what leaves
-        // stale pixel trails (ghosting) behind.
+        // Skip no-op moves — needless repaints are what leave ghost trails behind.
         if (width == _lastAppliedW && height == _lastAppliedH
             && x == _lastAppliedX && y == _lastAppliedY)
         {
-            MirrorTitleText.Text = $"Mirroring — phone screen {width}×{height} in pane {hostWidth}×{hostHeight}";
+            MirrorTitleText.Text = $"Mirroring — phone screen {width}×{height} in pane {panePixelW}×{panePixelH}";
             return;
         }
 
-        Native.MoveWindow(_scrcpyHwnd, x, y, width, height, true);
+        Native.SetWindowPos(_scrcpyHwnd, IntPtr.Zero, x, y, width, height,
+            Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
         _lastAppliedW = width;
         _lastAppliedH = height;
         _lastAppliedX = x;
         _lastAppliedY = y;
 
         // Live diagnostics so issues are visible in the pane itself.
-        MirrorTitleText.Text = $"Mirroring — phone screen {width}×{height} in pane {hostWidth}×{hostHeight}";
-    }
-
-    private Size GetPanePixelSize()
-    {
-        var dpi = 1.0;
-        var source = PresentationSource.FromVisual(this);
-        if (source?.CompositionTarget != null)
-            dpi = source.CompositionTarget.TransformToDevice.M11;
-
-        var width = Math.Max(320, (int)((ActualWidth - 10) * dpi));
-        var height = Math.Max(240, (int)((ActualHeight - 42) * dpi)); // minus top bar
-        return new Size(width, height);
+        MirrorTitleText.Text = $"Mirroring — phone screen {width}×{height} in pane {panePixelW}×{panePixelH}";
     }
 
     private void StartSizeSync()
     {
         _sizeTimer?.Stop();
         _sizeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
-        _sizeTimer.Tick += (_, _) => ResizeMirror();
+        _sizeTimer.Tick += (_, _) => PositionFloatingMirror();
         _sizeTimer.Start();
     }
 
@@ -534,7 +552,23 @@ public partial class MirrorPane : UserControl
     private void OnBackToSetup(object sender, RoutedEventArgs e)
     {
         // Keep the mirror running; just show the setup controls again.
+        if (_scrcpyHwnd != IntPtr.Zero)
+            Native.ShowWindow(_scrcpyHwnd, Native.SW_HIDE);
+
+        ReturnBtn.Visibility = Visibility.Visible;
         MirrorSetup.Visibility = Visibility.Visible;
+    }
+
+    private void OnReturnToMirror(object sender, RoutedEventArgs e)
+    {
+        MirrorSetup.Visibility = Visibility.Collapsed;
+        MirrorPanel.Visibility = Visibility.Visible;
+
+        if (_scrcpyHwnd != IntPtr.Zero)
+        {
+            Native.ShowWindow(_scrcpyHwnd, Native.SW_SHOWNA);
+            RepositionSoon();
+        }
     }
 
     private void StopMirrorCore()
@@ -574,6 +608,7 @@ public partial class MirrorPane : UserControl
 
         MirrorPanel.Visibility = Visibility.Collapsed;
         MirrorSetup.Visibility = Visibility.Visible;
+        ReturnBtn.Visibility = Visibility.Collapsed;
         StatusMessage = message;
 
         if (_adb != null) _ = RefreshAsync();
