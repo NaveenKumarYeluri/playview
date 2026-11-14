@@ -44,10 +44,14 @@ public partial class MirrorPane : UserControl
     private DispatcherTimer? _streamAliveTimer;
     private ulong _lastDemuxBytes;
     private int _stallTicks;
-    private int _nudgesLeft;
-    // VLC renders straight into this borderless window's HWND — no WPF
-    // airspace tricks, no LibVLCSharp overlay windows.
-    private Window? _streamWindow;
+    // First-play tiny race: check VLC's vout sub-window size for the first
+    // seconds of playback; two consecutive mismatches → one auto restart.
+    private int _voutChecksLeft;
+    private int _voutMismatchStreak;
+    private bool _healRestartUsed;
+    // VLC renders directly into the HwndHost's native child HWND — a real
+    // child of the app window, so the video lives INSIDE PlayView: no
+    // floating/topmost window, no focus fights, no click black-flashes.
     private IntPtr _streamHwnd;
 
     public MirrorPane()
@@ -61,8 +65,9 @@ public partial class MirrorPane : UserControl
         };
         MirrorHost.SizeChanged += (_, _) => RepositionSoon();
 
-        // The mirror lives in its own native window — WPF's Visibility
-        // does not hide it, so mirror it to the pane's visibility explicitly.
+        // The scrcpy mirror window floats over the pane — mirror the pane's
+        // visibility to the native windows explicitly (the stream video is a
+        // child of the app window and cannot float anywhere).
         IsVisibleChanged += OnPaneVisibilityChanged;
     }
 
@@ -115,10 +120,6 @@ public partial class MirrorPane : UserControl
 
     // ── Visibility plumbing ──────────────────────────────────────────────
 
-    /// <summary>The floating window to glue over the pane right now:
-    /// the stream video window while streaming, otherwise the scrcpy window.</summary>
-    private IntPtr FloatHwnd => _streaming ? _streamHwnd : _scrcpyHwnd;
-
     private void OnPaneVisibilityChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
         var visible = (bool)e.NewValue;
@@ -126,12 +127,20 @@ public partial class MirrorPane : UserControl
         if (_scrcpyHwnd != IntPtr.Zero)
             Native.ShowWindow(_scrcpyHwnd, visible ? Native.SW_SHOWNA : Native.SW_HIDE);
 
-        // The stream's own video window: hide when the pane hides, re-show and
-        // re-glue when it comes back.
+        // The stream's video surface: hide when the pane hides, re-show when
+        // it comes back. A rebuilt visual tree can hand the HwndHost a fresh
+        // HWND — re-sync VLC to it.
         if (_streaming)
         {
-            if (visible) ShowStreamWindow();
-            else _streamWindow?.Hide();
+            var host = MirrorHost.ChildHwnd;
+            if (host != IntPtr.Zero && host != _streamHwnd)
+            {
+                _streamHwnd = host;
+                try { if (_streamPlayer != null) _streamPlayer.Hwnd = host; } catch { }
+            }
+
+            if (_streamHwnd != IntPtr.Zero)
+                Native.ShowWindow(_streamHwnd, visible ? Native.SW_SHOWNA : Native.SW_HIDE);
         }
     }
 
@@ -258,22 +267,26 @@ public partial class MirrorPane : UserControl
             // Set before showing the window — the position/focus glue keys off it.
             _streaming = true;
 
-            // VLC sizes its video to the window's size when the output is
-            // created — a pane that is still laying out would give a tiny
-            // picture forever. Wait for a real size first.
             for (var i = 0; i < 100 && MirrorHost.ActualWidth < 10; i++)
                 await Task.Delay(20);
             if (MirrorHost.ActualWidth < 10)
                 throw new InvalidOperationException("the mirror pane never got its layout");
 
-            ShowStreamWindow();
-
-            for (var i = 0; i < 50 && _streamHwnd == IntPtr.Zero; i++)
+            // The video surface is the HwndHost's native child window — the
+            // video is a real child of the app window from the very start.
+            _healRestartUsed = false;
+            for (var i = 0; i < 100 && MirrorHost.ChildHwnd == IntPtr.Zero; i++)
                 await Task.Delay(20);
-            if (_streamHwnd == IntPtr.Zero)
-                throw new InvalidOperationException("video window never appeared");
+            if (MirrorHost.ChildHwnd == IntPtr.Zero)
+                throw new InvalidOperationException("video surface never appeared");
+            _streamHwnd = MirrorHost.ChildHwnd;
 
-            PositionFloatingMirror(force: true);
+            // VLC sizes its video to the window's size when the output is
+            // created — an empty surface would give a tiny picture forever.
+            if (Native.GetClientRect(_streamHwnd, out var surface) &&
+                (surface.Right - surface.Left < 10 || surface.Bottom - surface.Top < 10))
+                throw new InvalidOperationException("video surface has no size yet");
+
             _streamPlayer.Hwnd = _streamHwnd;
 
             _streamUrl = url;
@@ -394,7 +407,8 @@ public partial class MirrorPane : UserControl
         _streamMedia.AddOption(":network-caching=1500");
         _lastDemuxBytes = 0;
         _stallTicks = 0;
-        _nudgesLeft = 0;
+        _voutChecksLeft = 8;      // watch the vout size for the first ~8 s
+        _voutMismatchStreak = 0;
         _streamPlayer!.Play(_streamMedia);
     }
 
@@ -407,29 +421,21 @@ public partial class MirrorPane : UserControl
         _streamAliveTimer?.Stop();
         _lastDemuxBytes = 0;
         _stallTicks = 0;
-        _nudgesLeft = 3;
         _streamAliveTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _streamAliveTimer.Tick += (_, _) =>
         {
             if (!_streaming) return;
 
-        // While the video output is fresh, nudge the window by one pixel a
-        // few times so VLC re-reads the real client size and re-places the
-        // video. One shot can fire too early (before VLC's sub-window
-        // exists); repeating over the first seconds heals the "tiny picture
-        // on the very first play" race for good. The 400 ms size-sync timer
-        // restores the exact size a moment after each nudge.
-        if (_nudgesLeft > 0 && _streamPlayer.VoutCount > 0)
+        // First seconds of playback: verify VLC's vout sub-window actually
+        // matches the pane and auto-heal once if it doesn't.
+        if (_voutChecksLeft > 0 && _streamPlayer.VoutCount > 0)
         {
-            _nudgesLeft--;
-            if (Native.GetWindowRect(_streamHwnd, out var rect))
-            {
-                AppendMirrorLog($"stream: vout re-place nudge ({_nudgesLeft} left)");
-                Native.SetWindowPos(_streamHwnd, IntPtr.Zero, 0, 0,
-                    rect.Right - rect.Left, rect.Bottom - rect.Top - 1,
-                    Native.SWP_NOMOVE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
-            }
+            _voutChecksLeft--;
+            CheckVoutSize();
         }
+
+        if (_streamPlayer.VoutCount > 0)
+            MirrorTitleText.Text = "Streaming — live";
 
         ulong bytes = 0;
         try
@@ -460,6 +466,77 @@ public partial class MirrorPane : UserControl
         _streamAliveTimer.Start();
     }
 
+    /// <summary>First-play tiny race: VLC 3.0 builds its own window tree
+    /// ("VLC video main" + "VLC video output" sub-window) inside the HWND we
+    /// hand it, and if the vout opens against a stale size the picture stays
+    /// tiny forever — nudges never heal it, only a player restart does (the
+    /// stop+start workaround, automated). The expected sub-window size is the
+    /// video's aspect ratio fitted into the pane; two consecutive mismatches
+    /// trigger exactly one automatic stop+start.</summary>
+    private void CheckVoutSize()
+    {
+        if (_streamHwnd == IntPtr.Zero || _healRestartUsed) return;
+
+        if (!Native.GetClientRect(_streamHwnd, out var paneRect)) return;
+        var paneW = paneRect.Right - paneRect.Left;
+        var paneH = paneRect.Bottom - paneRect.Top;
+        if (paneW < 10 || paneH < 10) return;
+
+        // Find VLC's render sub-window (a descendant of our surface).
+        IntPtr vout = IntPtr.Zero;
+        Native.EnumChildWindows(_streamHwnd, (hwnd, _) =>
+        {
+            var name = new System.Text.StringBuilder(64);
+            Native.GetClassNameW(hwnd, name, 64);
+            if (name.ToString().StartsWith("VLC video output", StringComparison.Ordinal))
+            {
+                vout = hwnd;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        if (vout == IntPtr.Zero) return; // vout tree not built yet
+
+        if (!Native.GetWindowRect(vout, out var voutRect)) return;
+        var voutW = voutRect.Right - voutRect.Left;
+        var voutH = voutRect.Bottom - voutRect.Top;
+
+        // The sub-window holds the aspect-fitted video place, not the pane rect.
+        uint vw = 0, vh = 0;
+        try { _streamPlayer!.Size(0, ref vw, ref vh); } catch { }
+        if (vw == 0 || vh == 0) return;
+
+        var scale = Math.Min((double)paneW / vw, (double)paneH / vh);
+        var expW = (int)Math.Round(vw * scale);
+        var expH = (int)Math.Round(vh * scale);
+        var tol = Math.Max(16, Math.Max(expW, expH) / 32);
+
+        if (Math.Abs(voutW - expW) <= tol && Math.Abs(voutH - expH) <= tol)
+        {
+            if (_voutMismatchStreak > 0)
+                AppendMirrorLog($"stream: vout sub-window OK ({voutW}x{voutH})");
+            _voutMismatchStreak = 0;
+            return;
+        }
+
+        _voutMismatchStreak++;
+        AppendMirrorLog($"stream: vout sub-window {voutW}x{voutH}, expected ~{expW}x{expH} " +
+                        $"(mismatch #{_voutMismatchStreak})");
+        if (_voutMismatchStreak < 2) return;
+
+        // One automatic stop+start — exactly the manual workaround that
+        // reliably fixes the tiny picture. Never repeated automatically.
+        _healRestartUsed = true;
+        AppendMirrorLog("stream: vout mis-sized — auto-restarting the player once");
+        var player = _streamPlayer;
+        Task.Run(async () =>
+        {
+            try { if (player is { IsPlaying: true }) player.Stop(); } catch { }
+            await Task.Delay(400);
+            _ = Dispatcher.InvokeAsync(() => { if (_streaming) PlayStreamMedia(); });
+        });
+    }
+
     /// <summary>Reports a stream problem without yanking the user back to setup —
     /// the pane stays visible and the message is readable.</summary>
     private void ShowStreamNotice(string message)
@@ -467,41 +544,8 @@ public partial class MirrorPane : UserControl
         StatusMessage = message;
         AppendMirrorLog("stream: " + message);
         MirrorTitleText.Text = "PlayView stream";
-        _streamWindow?.Hide();
-    }
-
-    /// <summary>VLC's video home: a borderless top-level window, positioned over
-    /// the pane with the same glue as the scrcpy fallback. VLC renders directly
-    /// into its HWND — no WPF airspace issues possible.</summary>
-    private void EnsureStreamWindow()
-    {
-        if (_streamWindow != null) return;
-
-        _streamWindow = new Window
-        {
-            WindowStyle = WindowStyle.None,
-            ResizeMode = ResizeMode.NoResize,
-            ShowInTaskbar = false,
-            ShowActivated = false,
-            Background = System.Windows.Media.Brushes.Black,
-            Title = "PlayViewStream",
-        };
-    }
-
-    private void ShowStreamWindow()
-    {
-        EnsureStreamWindow();
-        var win = _streamWindow!;
-        if (!win.IsVisible)
-        {
-            win.Show();
-            _streamHwnd = new WindowInteropHelper(win).EnsureHandle();
-            // Topmost band, like the scrcpy fallback window, so the pane can
-            // never bury it behind our chrome.
-            Native.SetWindowPos(_streamHwnd, Native.HWND_TOPMOST, 0, 0, 0, 0,
-                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
-        }
-        PositionFloatingMirror(force: true);
+        if (_streamHwnd != IntPtr.Zero)
+            Native.ShowWindow(_streamHwnd, Native.SW_HIDE);
     }
 
     private void OnStreamStop(object sender, RoutedEventArgs e)
@@ -513,7 +557,7 @@ public partial class MirrorPane : UserControl
 
     private void EndStreamUi(string message)
     {
-        if (!_streaming && (_streamWindow == null || !_streamWindow.IsVisible))
+        if (!_streaming)
         {
             StatusMessage = message;
             return;
@@ -527,7 +571,10 @@ public partial class MirrorPane : UserControl
         if (player != null)
             Task.Run(() => { try { if (player.IsPlaying) player.Stop(); } catch { } });
 
-        _streamWindow?.Hide();
+        // Park the video surface (it is a child of the app window — hiding it
+        // can never leave it floating over anything else).
+        if (_streamHwnd != IntPtr.Zero)
+            Native.ShowWindow(_streamHwnd, Native.SW_HIDE);
 
         MirrorPanel.Visibility = Visibility.Collapsed;
         MirrorSetup.Visibility = Visibility.Visible;
@@ -811,46 +858,46 @@ public partial class MirrorPane : UserControl
         win.SizeChanged += (_, _) => RepositionSoon();
         win.Activated += (_, _) =>
         {
-            // Back in our app: re-glue the floating window over the pane.
-            var hwnd = FloatHwnd;
-            if (hwnd == IntPtr.Zero) return;
-            Native.ShowWindow(hwnd, Native.SW_SHOWNA);
+            // Back in our app: re-glue the floating scrcpy window over the pane.
+            if (_scrcpyHwnd == IntPtr.Zero) return;
+            Native.ShowWindow(_scrcpyHwnd, Native.SW_SHOWNA);
             PositionFloatingMirror(force: true);
         };
         win.Deactivated += (_, _) =>
         {
-            // Another app got focus: hide the floating window so it never
-            // floats over it — unless the user clicked it (playing with the phone).
-            if (!_embedded && !_streaming) return;
-            var hwnd = FloatHwnd;
-            if (hwnd == IntPtr.Zero || Native.GetForegroundWindow() == hwnd) return;
-            Native.ShowWindow(hwnd, Native.SW_HIDE);
+            // Another app got focus: hide the floating scrcpy window so it
+            // never floats over it. The stream video is a child window — it
+            // cannot float over anything, ever.
+            if (!_embedded) return;
+            if (_scrcpyHwnd == IntPtr.Zero || Native.GetForegroundWindow() == _scrcpyHwnd) return;
+            Native.ShowWindow(_scrcpyHwnd, Native.SW_HIDE);
         };
         win.StateChanged += (_, _) =>
         {
-            var hwnd = FloatHwnd;
-            if (hwnd == IntPtr.Zero || win == null) return;
+            if (_scrcpyHwnd == IntPtr.Zero || win == null) return;
 
             if (win.WindowState == WindowState.Minimized)
-                Native.ShowWindow(hwnd, Native.SW_HIDE);
+                Native.ShowWindow(_scrcpyHwnd, Native.SW_HIDE);
             else
             {
-                Native.ShowWindow(hwnd, Native.SW_SHOWNA);
+                Native.ShowWindow(_scrcpyHwnd, Native.SW_SHOWNA);
                 RepositionSoon();
             }
         };
     }
 
-    /// <summary>Repositions the floating window after any move/resize, batched per layout pass.</summary>
+    /// <summary>Repositions the floating scrcpy window after any move/resize,
+    /// batched per layout pass. The stream video needs no glue — it is a real
+    /// child window that follows WPF layout by itself.</summary>
     private void RepositionSoon()
     {
-        if (FloatHwnd == IntPtr.Zero) return;
+        if (_scrcpyHwnd == IntPtr.Zero) return;
         Dispatcher.InvokeAsync(() => PositionFloatingMirror(), DispatcherPriority.Loaded);
     }
 
     private void PositionFloatingMirror(bool force = false)
     {
-        var hwnd = FloatHwnd;
+        var hwnd = _scrcpyHwnd;
         if (hwnd == IntPtr.Zero) return;
 
         var paneW = MirrorHost.ActualWidth;
@@ -886,9 +933,8 @@ public partial class MirrorPane : UserControl
         if (!force && panePixelW == _lastAppliedW && panePixelH == _lastAppliedH
             && x == _lastAppliedX && y == _lastAppliedY)
         {
-            MirrorTitleText.Text = _streaming
-                ? "Streaming — live"
-                : $"Mirroring — window {panePixelW}×{panePixelH} (scrcpy fits the video itself)";
+            MirrorTitleText.Text =
+                $"Mirroring — window {panePixelW}×{panePixelH} (scrcpy fits the video itself)";
             return;
         }
 
@@ -902,9 +948,7 @@ public partial class MirrorPane : UserControl
         _lastAppliedY = y;
 
         // Live diagnostics so issues are visible in the pane itself.
-        MirrorTitleText.Text = _streaming
-            ? $"Streaming — live ({panePixelW}×{panePixelH})"
-            : $"Mirroring — window {panePixelW}×{panePixelH} at ({x},{y})";
+        MirrorTitleText.Text = $"Mirroring — window {panePixelW}×{panePixelH} at ({x},{y})";
     }
 
     /// <summary>Pane area in physical screen pixels, for scrcpy's launch args.</summary>
@@ -1045,8 +1089,13 @@ public partial class MirrorPane : UserControl
     {
         if (_streaming)
         {
-            // Hide the video window so the setup controls are clickable.
-            _streamWindow?.Hide();
+            // Park the video surface and collapse the video view entirely:
+            // MirrorPanel paints an opaque pane background as a LATER Grid
+            // sibling, so it would cover the setup controls with black.
+            if (_streamHwnd != IntPtr.Zero)
+                Native.ShowWindow(_streamHwnd, Native.SW_HIDE);
+            StreamGrid.Visibility = Visibility.Collapsed;
+            MirrorPanel.Visibility = Visibility.Collapsed;
 
             ReturnBtn.Visibility = Visibility.Visible;
             MirrorSetup.Visibility = Visibility.Visible;
@@ -1054,8 +1103,11 @@ public partial class MirrorPane : UserControl
         }
 
         // Keep the mirror running; just show the setup controls again.
+        // (MirrorPanel's opaque background would cover them — collapse it.)
         if (_scrcpyHwnd != IntPtr.Zero)
             Native.ShowWindow(_scrcpyHwnd, Native.SW_HIDE);
+        MirrorPanel.Visibility = Visibility.Collapsed;
+        StreamGrid.Visibility = Visibility.Collapsed;
 
         ReturnBtn.Visibility = Visibility.Visible;
         MirrorSetup.Visibility = Visibility.Visible;
@@ -1065,10 +1117,13 @@ public partial class MirrorPane : UserControl
     {
         MirrorSetup.Visibility = Visibility.Collapsed;
         MirrorPanel.Visibility = Visibility.Visible;
+        StreamGrid.Visibility = Visibility.Visible;
 
         if (_streaming)
         {
-            ShowStreamWindow();
+            // Give the video surface its airspace back and show it again.
+            if (_streamHwnd != IntPtr.Zero)
+                Native.ShowWindow(_streamHwnd, Native.SW_SHOWNA);
             return;
         }
 
@@ -1150,16 +1205,9 @@ public partial class MirrorPane : UserControl
         }
         catch { /* player already gone */ }
 
-        try
-        {
-            if (_streamWindow != null)
-            {
-                _streamWindow.Close();
-                _streamWindow = null;
-            }
-            _streamHwnd = IntPtr.Zero;
-        }
-        catch { /* window already gone */ }
+        // The stream surface belonged to the HwndHost — it dies with the
+        // visual tree; there is no floating window to close.
+        _streamHwnd = IntPtr.Zero;
 
         _ = KillDeviceServerAsync();
     }
