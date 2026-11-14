@@ -154,6 +154,12 @@ public partial class MirrorPane : UserControl
             return;
         }
 
+        // If a stream is already running (e.g. user clicked Setup while streaming),
+        // stop it first — the phone serves one client at a time and the pre-flight
+        // probe will fail while VLC is still connected.
+        if (_streaming)
+            await StopExistingStreamAsync();
+
         StatusMessage = "Setting up the USB stream tunnel…";
         try
         {
@@ -180,9 +186,26 @@ public partial class MirrorPane : UserControl
             return;
         }
 
+        if (_streaming)
+            await StopExistingStreamAsync();
+
         if (!await ProbePhoneAsync(ip, "Wi-Fi"))
             return;
         StartStream($"http://{ip}:{StreamPort}");
+    }
+
+    private async Task StopExistingStreamAsync()
+    {
+        _streaming = false;
+        _streamAliveTimer?.Stop();
+        if (_streamPlayer != null)
+        {
+            try { if (_streamPlayer.IsPlaying) _streamPlayer.Stop(); } catch { }
+        }
+        if (_streamHwnd != IntPtr.Zero)
+            Native.ShowWindow(_streamHwnd, Native.SW_HIDE);
+        // Give phone-side server loop time to catch client disconnect and return to accept()
+        await Task.Delay(500);
     }
 
     /// <summary>Pre-flight that proves the phone is actually serving its stream:
@@ -283,6 +306,17 @@ public partial class MirrorPane : UserControl
 
             // VLC sizes its video to the window's size when the output is
             // created — an empty surface would give a tiny picture forever.
+            // Explicitly resize the native child window to match the WPF pane's
+            // actual layout size BEFORE handing it to VLC, so the very first
+            // vout opens at full resolution (eliminates the tiny-video-on-first-start race).
+            var dpi = 1.0;
+            var source = PresentationSource.FromVisual(this);
+            if (source?.CompositionTarget != null)
+                dpi = source.CompositionTarget.TransformToDevice.M11;
+            var hostW = Math.Max(1, (int)Math.Round(MirrorHost.ActualWidth * dpi));
+            var hostH = Math.Max(1, (int)Math.Round(MirrorHost.ActualHeight * dpi));
+            Native.MoveWindow(_streamHwnd, 0, 0, hostW, hostH, true);
+
             if (Native.GetClientRect(_streamHwnd, out var surface) &&
                 (surface.Right - surface.Left < 10 || surface.Bottom - surface.Top < 10))
                 throw new InvalidOperationException("video surface has no size yet");
@@ -325,7 +359,12 @@ public partial class MirrorPane : UserControl
     /// into mirror.log — decoder/display problems are named there.</summary>
     private LibVLC CreateStreamLibVlc()
     {
-        var lib = new LibVLC("--no-video-title-show", "--verbose=2");
+        // Force DirectSound audio output — VLC's default auto-detection can
+        // fail silently when the video renders into a custom HwndHost child
+        // window (our PlayViewMirrorHost), leaving the stream with picture
+        // but no sound.
+        var lib = new LibVLC("--no-video-title-show", "--verbose=2",
+                             "--aout=directsound");
         lib.Log += (_, e) =>
         {
             if (e.Level >= LogLevel.Notice)
@@ -349,7 +388,7 @@ public partial class MirrorPane : UserControl
 
     private MediaPlayer CreateStreamPlayer()
     {
-        var player = new MediaPlayer(_streamLibVlc!) { Volume = 85 };
+        var player = new MediaPlayer(_streamLibVlc!) { Volume = 100 };
         player.Playing += (_, _) =>
         {
             AppendMirrorLog("stream: VLC is playing");
@@ -445,7 +484,7 @@ public partial class MirrorPane : UserControl
         }
         catch { }
 
-        if (bytes == _lastDemuxBytes && _streamPlayer is { State: VLCState.Playing })
+        if (bytes > 0 && bytes == _lastDemuxBytes && _streamPlayer is { State: VLCState.Playing })
         {
             _stallTicks++;
             if (_stallTicks == 5)
@@ -457,7 +496,7 @@ public partial class MirrorPane : UserControl
                 OnStreamEnded();
             }
         }
-        else
+        else if (bytes > 0)
         {
             _stallTicks = 0;
             _lastDemuxBytes = bytes;
@@ -1026,7 +1065,9 @@ public partial class MirrorPane : UserControl
 
     private async void OnTapCenter(object sender, RoutedEventArgs e)
     {
-        if (_adb == null || _scrcpyProcess is not { HasExited: false }) return;
+        if (_adb == null) return;
+        // Allow tap-center both during scrcpy mirroring and during streaming
+        if (!_streaming && _scrcpyProcess is not { HasExited: false }) return;
 
         var screen = await GetDeviceScreenAsync();
         if (screen == null) return;
@@ -1055,7 +1096,9 @@ public partial class MirrorPane : UserControl
 
     private async Task SendKeyEvent(int keyCode)
     {
-        if (_adb == null || _scrcpyProcess is not { HasExited: false }) return;
+        if (_adb == null) return;
+        // Allow key events both during scrcpy mirroring and during streaming
+        if (!_streaming && _scrcpyProcess is not { HasExited: false }) return;
         try
         {
             await ScrcpyService.RunAdbAsync(_adb, $"shell input keyevent {keyCode}");

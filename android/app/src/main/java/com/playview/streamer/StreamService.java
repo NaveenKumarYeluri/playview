@@ -310,9 +310,7 @@ public class StreamService extends Service {
         }, "pv-keepalive");
 
         VideoPipeline video = new VideoPipeline(mux, w, h, m.densityDpi);
-        AudioPipeline audio = Build.VERSION.SDK_INT >= 29
-                ? new AudioPipeline(mux)
-                : null;
+        AudioPipeline audio = new AudioPipeline(mux);
 
         try {
             video.start();
@@ -477,12 +475,6 @@ public class StreamService extends Service {
         void start() {
             try {
                 log("audio pipeline starting");
-                AudioPlaybackCaptureConfiguration cfg =
-                        new AudioPlaybackCaptureConfiguration.Builder(projection)
-                                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                                .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                                .build();
                 AudioFormat af = new AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                         .setSampleRate(44100)
@@ -490,20 +482,46 @@ public class StreamService extends Service {
                         .build();
                 int minBuf = AudioRecord.getMinBufferSize(44100,
                         AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT);
-                record = new AudioRecord.Builder()
-                        .setAudioFormat(af)
-                        .setBufferSizeInBytes(Math.max(minBuf, 64 * 1024))
-                        .setAudioPlaybackCaptureConfig(cfg)
-                        .build();
-                log("audio record created, state=" + record.getState());
+                int bufSize = Math.max(minBuf, 64 * 1024);
+
+                if (Build.VERSION.SDK_INT >= 29) {
+                    try {
+                        AudioPlaybackCaptureConfiguration cfg =
+                                new AudioPlaybackCaptureConfiguration.Builder(projection)
+                                        .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
+                                        .addMatchingUsage(AudioAttributes.USAGE_GAME)
+                                        .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
+                                        .build();
+                        record = new AudioRecord.Builder()
+                                .setAudioFormat(af)
+                                .setBufferSizeInBytes(bufSize)
+                                .setAudioPlaybackCaptureConfig(cfg)
+                                .build();
+                        log("audio record created with AudioPlaybackCapture, state=" + record.getState());
+                    } catch (Throwable t) {
+                        logW("AudioPlaybackCapture init failed, falling back to MIC", t);
+                        record = null;
+                    }
+                }
+
+                if (record == null || record.getState() != AudioRecord.STATE_INITIALIZED) {
+                    log("initializing AudioRecord with AudioSource.MIC");
+                    record = new AudioRecord(
+                            android.media.MediaRecorder.AudioSource.MIC,
+                            44100,
+                            AudioFormat.CHANNEL_IN_STEREO,
+                            AudioFormat.ENCODING_PCM_16BIT,
+                            bufSize);
+                    log("audio record created with MIC, state=" + record.getState());
+                }
+
                 if (record.getState() != AudioRecord.STATE_INITIALIZED) {
-                    logW("audio record NOT initialized — capture unsupported on this ROM?", null);
+                    logW("audio record NOT initialized — check RECORD_AUDIO permission", null);
                     stop();
                     return;
                 }
                 record.startRecording();
-                log("audio recording state=" + record.getRecordingState()
-                        + " (1=recording, 2 should be RECORDING after start)");
+                log("audio recording state=" + record.getRecordingState());
                 if (record.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
                     logW("audio record failed to start recording", null);
                     stop();
@@ -520,7 +538,6 @@ public class StreamService extends Service {
                 encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC);
                 encoder.configure(f, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
                 encoder.start();
-                record.startRecording();
 
                 feedThread = new Thread(this::feed, "pv-audio-in");
                 drainThread = new Thread(this::drain, "pv-audio-out");

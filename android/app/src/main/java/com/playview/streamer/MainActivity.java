@@ -80,11 +80,17 @@ public class MainActivity extends Activity {
     }
 
     private void beginStart() {
+        java.util.ArrayList<String> perms = new java.util.ArrayList<>();
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            perms.add(Manifest.permission.RECORD_AUDIO);
+        }
         if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
                    != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},
-                    REQUEST_NOTIFICATIONS);
+            perms.add(Manifest.permission.POST_NOTIFICATIONS);
+        }
+        if (!perms.isEmpty()) {
+            requestPermissions(perms.toArray(new String[0]), REQUEST_NOTIFICATIONS);
             return;
         }
         requestCapture();
@@ -93,8 +99,7 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(requestCode, permissions, results);
-        // Continue even if notifications were denied (stream still works).
-        if (requestCode == REQUEST_NOTIFICATIONS) requestCapture();
+        requestCapture();
     }
 
     private void requestCapture() {
