@@ -204,6 +204,10 @@ public class StreamService extends Service {
 
         TSMuxer mux = new TSMuxer(out);
 
+        // Tables up front — VLC can identify the program even before the
+        // first frame arrives.
+        mux.writeTables();
+
         VideoPipeline video = new VideoPipeline(mux, w, h, m.densityDpi);
         AudioPipeline audio = Build.VERSION.SDK_INT >= 29
                 ? new AudioPipeline(mux)
@@ -253,6 +257,9 @@ public class StreamService extends Service {
             f.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1);
             f.setInteger(MediaFormat.KEY_COLOR_FORMAT,
                     MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+            // Re-submit the last frame when the screen is static — otherwise
+            // nothing changes on screen and the stream goes silent.
+            f.setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 200_000);
 
             encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
             encoder.configure(f, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);

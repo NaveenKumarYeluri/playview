@@ -189,6 +189,18 @@ public partial class MirrorPane : UserControl
 
             _streaming = true;
             StatusMessage = "Streaming from the phone through VLC's engine.";
+
+            // If VLC is still silent after 10 s, say so instead of leaving the
+            // user staring at a black pane.
+            _ = Task.Delay(10000).ContinueWith(_ => Dispatcher.Invoke(() =>
+            {
+                if (_streaming && _streamPlayer is { State: not VLCState.Playing })
+                {
+                    StatusMessage = "No picture yet — VLC is waiting for the phone's stream. " +
+                        "Make sure the phone app says \"Streaming\" (Start streaming), then try again.";
+                    AppendMirrorLog("stream: no data after 10 s (state: " + _streamPlayer.State + ")");
+                }
+            }));
         }
         catch (Exception ex)
         {
@@ -202,6 +214,11 @@ public partial class MirrorPane : UserControl
     private MediaPlayer CreateStreamPlayer()
     {
         var player = new MediaPlayer(_streamLibVlc!) { Volume = 85 };
+        player.Playing += (_, _) => AppendMirrorLog("stream: VLC is playing");
+        player.Buffering += (_, e) =>
+        {
+            if (e.Cache < 100) AppendMirrorLog("stream: buffering");
+        };
         player.EndReached += (_, _) => Dispatcher.InvokeAsync(
             () => EndStreamUi("Stream ended — the phone stopped streaming or disconnected."));
         player.EncounteredError += (_, _) => Dispatcher.InvokeAsync(

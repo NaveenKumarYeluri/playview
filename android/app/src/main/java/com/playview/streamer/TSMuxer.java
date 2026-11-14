@@ -18,7 +18,8 @@ final class TSMuxer {
     private static final int PMT_PID = 0x1000;
 
     private final OutputStream out;
-    private final int[] cc = new int[2]; // continuity counters: 0 = video, 1 = audio
+    // Continuity counters — one per PID domain: 0 video, 1 audio, 2 PAT, 3 PMT.
+    private final int[] cc = new int[4];
     private boolean tablesSent;
 
     TSMuxer(OutputStream out) {
@@ -26,6 +27,11 @@ final class TSMuxer {
     }
 
     // ── Public API ──────────────────────────────────────────────────────────
+
+    /** Sends PAT + PMT right away, so VLC sees the program before the first frame. */
+    synchronized void writeTables() throws IOException {
+        ensureTables();
+    }
 
     /** Writes one H.264 access unit (Annex-B). ptsUs is the presentation time in µs. */
     synchronized void writeVideo(byte[] data, int len, long ptsUs) throws IOException {
@@ -63,7 +69,7 @@ final class TSMuxer {
         t[p++] = (byte) (0xE0 | ((PMT_PID >> 8) & 0x1F));
         t[p++] = (byte) (PMT_PID & 0xFF);
         writeSection(t, s, p);
-        writeTablePacket(t, p, 0x0000, 0);
+        writeTablePacket(t, p, 0x0000, 2); // PAT keeps its own continuity counter
     }
 
     private void writePmt() throws IOException {
@@ -91,7 +97,7 @@ final class TSMuxer {
         t[p++] = (byte) 0xF0; t[p++] = 0x00;
 
         writeSection(t, s, p);
-        writeTablePacket(t, p, PMT_PID, 0);
+        writeTablePacket(t, p, PMT_PID, 3); // and the PMT its own
     }
 
     /** Fills the section_length field and appends the CRC32 at position p. */
