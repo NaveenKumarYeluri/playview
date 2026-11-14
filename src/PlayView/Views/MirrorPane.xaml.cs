@@ -159,8 +159,10 @@ public partial class MirrorPane : UserControl
         StartStream($"http://{ip}:{StreamPort}");
     }
 
-    /// <summary>Quick TCP pre-flight: is the phone actually serving its stream?
-    /// Gives a precise message instead of letting VLC fail silently.</summary>
+    /// <summary>Pre-flight that proves the phone is actually serving its stream:
+    /// TCP-connect is not enough (adb's forward accepts on the laptop even when
+    /// nothing listens on the phone), so we send a GET and require a real
+    /// HTTP response. Gives a precise message instead of a silent VLC failure.</summary>
     private async Task<bool> ProbePhoneAsync(string host, string mode)
     {
         StatusMessage = $"Testing the {mode} connection to the phone…";
@@ -168,14 +170,33 @@ public partial class MirrorPane : UserControl
 
         try
         {
-            using var tcp = new TcpClient();
-            var connect = tcp.ConnectAsync(host, StreamPort);
-            var winner = await Task.WhenAny(connect, Task.Delay(3000));
-            if (winner == connect && tcp.Connected)
+            // The phone must answer the HTTP GET — that's the real test.
+            // (adb's forward accepts TCP on the laptop even when nothing
+            // listens on the phone, so connect alone proves nothing.)
+            var ok = await Task.Run(async () =>
             {
-                AppendMirrorLog($"probe {host}: reachable");
-                return true;
-            }
+                using var tcp = new TcpClient();
+                var connect = tcp.ConnectAsync(host, StreamPort);
+                if (await Task.WhenAny(connect, Task.Delay(3000)) != connect || !tcp.Connected)
+                    throw new IOException("no connection");
+
+                var stream = tcp.GetStream();
+                stream.ReadTimeout = 4000;
+                var req = System.Text.Encoding.ASCII.GetBytes(
+                    $"GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+                stream.Write(req, 0, req.Length);
+
+                var head = new byte[128];
+                int read;
+                try { read = stream.Read(head, 0, head.Length); }
+                catch (IOException) { throw new IOException("no HTTP answer in 4 s"); }
+                var answer = System.Text.Encoding.ASCII.GetString(head, 0, Math.Max(read, 0));
+                AppendMirrorLog("probe answer: " + answer.Replace("\r\n", " | "));
+                return read > 0 && answer.StartsWith("HTTP/1.1 200", StringComparison.Ordinal);
+            });
+
+            AppendMirrorLog($"probe {host}: " + (ok ? "streaming (got HTTP 200)" : "bad response"));
+            if (ok) return true;
         }
         catch (Exception ex)
         {
@@ -183,12 +204,12 @@ public partial class MirrorPane : UserControl
         }
 
         StatusMessage = mode == "USB"
-            ? "The phone isn't answering on the USB tunnel. On the phone, open PlayView Stream and tap " +
-              "\"Start streaming\" (accept the capture prompt) — the status there must say \"Streaming\". " +
-              "Then click Start (USB) again."
+            ? "The phone isn't serving its stream through the USB tunnel. On the phone, open PlayView Stream " +
+              "and tap \"Start streaming\" again (accept the capture prompt) — the status there must say " +
+              "\"Streaming\". Then click Start (USB)."
             : $"Can't reach {host}. Make sure PlayView Stream says \"Streaming\" on the phone and both " +
               "devices are on the same Wi-Fi network, then click Start (Wi-Fi) again.";
-        AppendMirrorLog($"probe {host}: unreachable");
+        AppendMirrorLog($"probe {host}: not streaming");
         return false;
     }
 

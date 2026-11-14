@@ -16,14 +16,24 @@ final class TSMuxer {
     private static final int VIDEO_PID = 0x0100;
     private static final int AUDIO_PID = 0x0101;
     private static final int PMT_PID = 0x1000;
+    private static final int NULL_PID = 0x1FFF;
 
     private final OutputStream out;
     // Continuity counters — one per PID domain: 0 video, 1 audio, 2 PAT, 3 PMT.
     private final int[] cc = new int[4];
     private boolean tablesSent;
+    /** Wall clock of the last write that actually reached the client —
+     *  the session watchdog keys off this to detect a dead client even when
+     *  no frames flow (static screen). */
+    private volatile long lastDataWriteMs = System.currentTimeMillis();
 
     TSMuxer(OutputStream out) {
         this.out = out;
+    }
+
+    /** Milliseconds since epoch of the last successful client write. */
+    long lastDataWriteMs() {
+        return lastDataWriteMs;
     }
 
     // ── Public API ──────────────────────────────────────────────────────────
@@ -31,18 +41,37 @@ final class TSMuxer {
     /** Sends PAT + PMT right away, so VLC sees the program before the first frame. */
     synchronized void writeTables() throws IOException {
         ensureTables();
+        lastDataWriteMs = System.currentTimeMillis();
     }
 
     /** Writes one H.264 access unit (Annex-B). ptsUs is the presentation time in µs. */
     synchronized void writeVideo(byte[] data, int len, long ptsUs) throws IOException {
         ensureTables();
         writePes(VIDEO_PID, 0, 0xE0, data, len, ptsUs, true);
+        lastDataWriteMs = System.currentTimeMillis();
     }
 
     /** Writes one AAC frame (raw, without ADTS — the header is added here). */
     synchronized void writeAudio(byte[] data, int len, long ptsUs) throws IOException {
         ensureTables();
         writePes(AUDIO_PID, 1, 0xC0, data, len, ptsUs, false);
+        lastDataWriteMs = System.currentTimeMillis();
+    }
+
+    /**
+     * Writes one null packet (PID 0x1FFF). Pure padding every TS player
+     * ignores — used as a keepalive so a disconnected client is detected by
+     * the failing write instead of hanging the session forever.
+     */
+    synchronized void writeNullPacket() throws IOException {
+        byte[] pk = new byte[188];
+        pk[0] = 0x47;
+        pk[1] = (byte) (NULL_PID >> 8);   // 0x1F
+        pk[2] = (byte) NULL_PID;          // 0xFF
+        pk[3] = 0x10;                     // no PUSI, null packets carry no CC
+        for (int i = 4; i < 188; i++) pk[i] = (byte) 0xFF;
+        out.write(pk);
+        lastDataWriteMs = System.currentTimeMillis();
     }
 
     private void ensureTables() throws IOException {

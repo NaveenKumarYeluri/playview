@@ -19,6 +19,7 @@ import android.media.projection.MediaProjection;
 import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.IBinder;
+import android.util.Log;
 import android.util.DisplayMetrics;
 import android.view.Surface;
 import android.view.WindowManager;
@@ -47,6 +48,7 @@ public class StreamService extends Service {
 
     public static final int PORT = 48335;
     private static final String CHANNEL_ID = "playview";
+    private static final String TAG = "PlayViewStream";
 
     private MediaProjection projection;
     private volatile boolean running;
@@ -73,11 +75,23 @@ public class StreamService extends Service {
 
         startForegroundWithNotice();
 
-        if (intent == null || running) return START_STICKY;
+        if (intent == null) {
+            // Sticky restart after the process was killed: the MediaProjection
+            // token is gone, so a "running" service with no server thread and
+            // no listener would be a zombie (notification up, port dead).
+            Log.w(TAG, "restarted without an intent — stopping (projection needs fresh consent)");
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        if (running) {
+            Log.i(TAG, "already streaming — duplicate start ignored");
+            return START_STICKY;
+        }
 
         int resultCode = intent.getIntExtra("resultCode", -1);
         Intent data = intent.getParcelableExtra("data");
         if (data == null) {
+            Log.w(TAG, "start without projection data");
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -86,9 +100,11 @@ public class StreamService extends Service {
                 (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
         MediaProjection p = mpm.getMediaProjection(resultCode, data);
         if (p == null) {
+            Log.w(TAG, "MediaProjection denied — token invalid");
             stopSelf();
             return START_NOT_STICKY;
         }
+        Log.i(TAG, "projection granted, starting server");
         projection = p;
         p.registerCallback(new MediaProjection.Callback() {
             @Override
@@ -132,33 +148,48 @@ public class StreamService extends Service {
     // ── Server loop ─────────────────────────────────────────────────────────
 
     private void serveLoop() {
-        ServerSocket server = null;
-        try {
-            server = new ServerSocket();
-            server.setReuseAddress(true);
-            server.bind(new InetSocketAddress(PORT));
-            while (running) {
-                Socket client = server.accept();
-                currentClient = client;
-                try {
-                    serveHttp(client);
-                } catch (Throwable ignored) {
-                    // Client gone or device hiccup — wait for the next connection.
-                } finally {
-                    try { client.close(); } catch (Exception ignored) { }
-                    currentClient = null;
-                    if (running) {
-                        try { Thread.sleep(200); } catch (InterruptedException e) { break; }
+        while (running) {
+            ServerSocket server = null;
+            try {
+                server = new ServerSocket();
+                server.setReuseAddress(true);
+                server.bind(new InetSocketAddress(PORT));
+                Log.i(TAG, "listening on port " + PORT);
+                while (running) {
+                    final Socket client;
+                    try {
+                        client = server.accept();
+                    } catch (IOException e) {
+                        if (!running) break; // shutdown closed the socket
+                        Log.w(TAG, "accept failed: " + e);
+                        break; // drop out and rebind
+                    }
+                    currentClient = client;
+                    try {
+                        Log.i(TAG, "client connected: " + client.getRemoteSocketAddress());
+                        serveHttp(client);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "session ended: " + t);
+                    } finally {
+                        try { client.close(); } catch (Exception ignored) { }
+                        currentClient = null;
+                        Log.i(TAG, "client closed — waiting for the next one");
                     }
                 }
+            } catch (Throwable t) {
+                Log.e(TAG, "server error: " + t);
+            } finally {
+                if (server != null) {
+                    try { server.close(); } catch (Exception ignored) { }
+                }
             }
-        } catch (IOException ignored) {
-            // Port unavailable — service idles; Stop clears it.
-        } finally {
-            if (server != null) {
-                try { server.close(); } catch (Exception ignored) { }
+            if (running) {
+                // Never idle silently: rebind so the port always comes back.
+                Log.w(TAG, "server loop exited — rebinding in 700 ms");
+                try { Thread.sleep(700); } catch (InterruptedException e) { break; }
             }
         }
+        Log.i(TAG, "server loop finished");
     }
 
     // ── HTTP: read the request, answer, then stream the TS body ─────────────
@@ -208,6 +239,27 @@ public class StreamService extends Service {
         // first frame arrives.
         mux.writeTables();
 
+        final java.util.concurrent.atomic.AtomicBoolean dead =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+
+        // Keepalive: null packets every 250 ms. When the client disappears,
+        // these writes fail immediately — no more sessions wedged on a socket
+        // nobody is reading while no frames flow (static screen).
+        Thread keepalive = new Thread(() -> {
+            while (running && !dead.get()) {
+                try {
+                    Thread.sleep(250);
+                    mux.writeNullPacket();
+                } catch (InterruptedException e) {
+                    break;
+                } catch (Throwable t) {
+                    dead.set(true);
+                    Log.i(TAG, "keepalive write failed — client is gone");
+                    break;
+                }
+            }
+        }, "pv-keepalive");
+
         VideoPipeline video = new VideoPipeline(mux, w, h, m.densityDpi);
         AudioPipeline audio = Build.VERSION.SDK_INT >= 29
                 ? new AudioPipeline(mux)
@@ -216,12 +268,21 @@ public class StreamService extends Service {
         try {
             video.start();
             if (audio != null) audio.start();
+            keepalive.start();
 
-            // Block until the video pipeline ends (client disconnect, stop…).
-            while (video.drainThread.isAlive() && running) {
+            // Block until the video pipeline ends — or the client does, or no
+            // real stream data (video/audio) has gone out for 10 s.
+            while (video.drainThread.isAlive() && running && !dead.get()) {
                 video.drainThread.join(200);
+                long idleMs = System.currentTimeMillis() - mux.lastDataWriteMs();
+                if (idleMs > 10_000) {
+                    Log.w(TAG, "no stream data for " + idleMs + " ms — ending session");
+                    break;
+                }
             }
         } finally {
+            dead.set(true);
+            keepalive.interrupt();
             if (audio != null) audio.stop();
             video.stop();
         }
@@ -265,9 +326,12 @@ public class StreamService extends Service {
             encoder.configure(f, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
             input = encoder.createInputSurface();
             encoder.start();
+            Log.i(TAG, "video encoder started: " + encoder.getCodecInfo().getName()
+                    + " " + w + "x" + h);
 
             display = projection.createVirtualDisplay("PlayViewMirror", w, h, dpi,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, input, null, null);
+            Log.i(TAG, "virtual display created (auto-mirror)");
 
             drainThread = new Thread(this::drain, "pv-video");
             drainThread.start();
@@ -275,6 +339,7 @@ public class StreamService extends Service {
 
         private void drain() {
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+            long frames = 0;
             try {
                 while (running) {
                     int idx = encoder.dequeueOutputBuffer(info, 10_000);
@@ -290,14 +355,20 @@ public class StreamService extends Service {
 
                             if ((info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
                                 codecConfig = data;
+                                Log.i(TAG, "video codec-config: " + data.length + " B");
                                 flushPending();
                             } else if (codecConfig != null) {
                                 flushPending();
                                 mux.writeVideo(data, data.length, info.presentationTimeUs);
+                                frames++;
+                                if (frames == 1 || frames % 150 == 0)
+                                    Log.i(TAG, "video frame #" + frames + " (" + data.length + " B)");
                             } else {
                                 pendingData.add(data);
                                 pendingPts.add(info.presentationTimeUs);
                                 if (pendingData.size() > 90) { // safety valve
+                                    Log.w(TAG, "dropping " + pendingData.size()
+                                            + " frames that arrived before codec-config");
                                     pendingData.clear();
                                     pendingPts.clear();
                                 }
@@ -307,9 +378,10 @@ public class StreamService extends Service {
                         if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break;
                     }
                 }
-            } catch (Throwable ignored) {
-                // Client disconnected or service stopping — session is over.
+            } catch (Throwable t) {
+                Log.w(TAG, "video drain ended: " + t);
             }
+            Log.i(TAG, "video drain finished after " + frames + " frames");
         }
 
         /** Writes queued frames, prepending SPS/PPS to the first one. */
@@ -430,6 +502,7 @@ public class StreamService extends Service {
 
         private void drain() {
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+            long frames = 0;
             try {
                 while (running && !stopping) {
                     int idx = encoder.dequeueOutputBuffer(info, 10_000);
@@ -446,13 +519,15 @@ public class StreamService extends Service {
 
                             mux.writeAudio(addAdtsHeader(frame, frame.length), frame.length + 7,
                                     info.presentationTimeUs);
+                            frames++;
+                            if (frames == 1) Log.i(TAG, "audio frames flowing");
                         }
                         encoder.releaseOutputBuffer(idx, false);
                         if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break;
                     }
                 }
-            } catch (Throwable ignored) {
-                // Client disconnected or service stopping.
+            } catch (Throwable t) {
+                Log.w(TAG, "audio drain ended after " + frames + " frames: " + t);
             }
         }
 
