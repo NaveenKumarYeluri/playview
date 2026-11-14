@@ -14,9 +14,25 @@ android {
         versionName "1.0"
     }
 
+    // Fixed signing key (committed to the repo) so every CI build installs
+    // over the previous one instead of failing with a signature conflict.
+    signingConfigs {
+        playview {
+            storeFile rootProject.file("playview-sign.pfx")
+            storePassword 'playview'
+            storeType 'PKCS12'
+            keyAlias 'playview'
+            keyPassword 'playview'
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig signingConfigs.playview
+        }
         release {
             minifyEnabled false
+            signingConfig signingConfigs.playview
         }
     }
 

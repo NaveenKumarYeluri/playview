@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.IO;
+using System.Net.Sockets;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Threading;
@@ -131,10 +133,12 @@ public partial class MirrorPane : UserControl
             return;
         }
 
+        if (!await ProbePhoneAsync("127.0.0.1", "USB"))
+            return;
         StartStream($"http://127.0.0.1:{StreamPort}");
     }
 
-    private void OnStreamStartWifi(object sender, RoutedEventArgs e)
+    private async void OnStreamStartWifi(object sender, RoutedEventArgs e)
     {
         var ip = StreamIpBox.Text.Trim();
         if (string.IsNullOrEmpty(ip))
@@ -143,7 +147,42 @@ public partial class MirrorPane : UserControl
             return;
         }
 
+        if (!await ProbePhoneAsync(ip, "Wi-Fi"))
+            return;
         StartStream($"http://{ip}:{StreamPort}");
+    }
+
+    /// <summary>Quick TCP pre-flight: is the phone actually serving its stream?
+    /// Gives a precise message instead of letting VLC fail silently.</summary>
+    private async Task<bool> ProbePhoneAsync(string host, string mode)
+    {
+        StatusMessage = $"Testing the {mode} connection to the phone…";
+        AppendMirrorLog($"probe {host}:{StreamPort} ({mode})");
+
+        try
+        {
+            using var tcp = new TcpClient();
+            var connect = tcp.ConnectAsync(host, StreamPort);
+            var winner = await Task.WhenAny(connect, Task.Delay(3000));
+            if (winner == connect && tcp.Connected)
+            {
+                AppendMirrorLog($"probe {host}: reachable");
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppendMirrorLog($"probe {host}: {ex.Message}");
+        }
+
+        StatusMessage = mode == "USB"
+            ? "The phone isn't answering on the USB tunnel. On the phone, open PlayView Stream and tap " +
+              "\"Start streaming\" (accept the capture prompt) — the status there must say \"Streaming\". " +
+              "Then click Start (USB) again."
+            : $"Can't reach {host}. Make sure PlayView Stream says \"Streaming\" on the phone and both " +
+              "devices are on the same Wi-Fi network, then click Start (Wi-Fi) again.";
+        AppendMirrorLog($"probe {host}: unreachable");
+        return false;
     }
 
     private async void StartStream(string url)
@@ -219,11 +258,29 @@ public partial class MirrorPane : UserControl
         {
             if (e.Cache < 100) AppendMirrorLog("stream: buffering");
         };
-        player.EndReached += (_, _) => Dispatcher.InvokeAsync(
-            () => EndStreamUi("Stream ended — the phone stopped streaming or disconnected."));
-        player.EncounteredError += (_, _) => Dispatcher.InvokeAsync(
-            () => EndStreamUi("Stream error — check that the PlayView Stream app is still streaming."));
+        player.EndReached += (_, _) => Dispatcher.InvokeAsync(() =>
+        {
+            _streaming = false;
+            ShowStreamNotice("Stream ended — the phone stopped streaming or disconnected. " +
+                             "Start streaming on the phone again, then click Start (USB/Wi-Fi).");
+        });
+        player.EncounteredError += (_, _) => Dispatcher.InvokeAsync(() =>
+        {
+            _streaming = false;
+            ShowStreamNotice("Stream error — VLC could not play the phone's stream. " +
+                             "Check the phone app is 'Streaming', then click Start (USB/Wi-Fi) to retry. " +
+                             "(Details: mirror.log)");
+        });
         return player;
+    }
+
+    /// <summary>Reports a stream problem without yanking the user back to setup —
+    /// the pane stays visible and the message is readable.</summary>
+    private void ShowStreamNotice(string message)
+    {
+        StatusMessage = message;
+        AppendMirrorLog("stream: " + message);
+        MirrorTitleText.Text = "PlayView stream";
     }
 
     private void OnStreamStop(object sender, RoutedEventArgs e)
