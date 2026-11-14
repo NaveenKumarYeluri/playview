@@ -356,6 +356,10 @@ public class StreamService extends Service {
                             if ((info.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
                                 codecConfig = data;
                                 Log.i(TAG, "video codec-config: " + data.length + " B");
+                                // Send SPS/PPS immediately — many encoders never
+                                // inline them into the IDR, and a decoder that
+                                // misses them waits forever (black picture).
+                                mux.writeVideo(data, data.length, info.presentationTimeUs);
                                 flushPending();
                             } else if (codecConfig != null) {
                                 flushPending();
