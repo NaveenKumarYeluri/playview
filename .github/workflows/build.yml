@@ -49,6 +49,8 @@ jobs:
 
   android:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -67,9 +69,40 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      # Fixed signing key: restore from cache, or generate once. The generated
+      # keystore is then committed to the repo, making it permanent.
+      - name: Restore signing keystore
+        id: keystore
+        uses: actions/cache@v4
+        with:
+          path: android/keystore.jks
+          key: playview-signing-v1
+
+      - name: Generate signing keystore (first time only)
+        id: genkey
+        if: steps.keystore.outputs.cache-hit != 'true' && !hashFiles('android/keystore.jks')
+        run: |
+          keytool -genkeypair -v \
+            -keystore android/keystore.jks \
+            -storepass playview -keypass playview \
+            -alias playview -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=PlayView Stream"
+          echo "generated=true" >> "$GITHUB_OUTPUT"
+
       - name: Build debug APK
         working-directory: android
         run: gradle assembleDebug --no-daemon
+
+      - name: Commit the keystore so future builds reuse it
+        if: always() && steps.genkey.outputs.generated == 'true'
+        run: |
+          git config user.name "playview-ci"
+          git config user.email "playview-ci@users.noreply.github.com"
+          git add android/keystore.jks
+          if ! git diff --cached --quiet; then
+            git commit -m "Add permanent APK signing keystore (generated once in CI)"
+            git push origin HEAD:main
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
