@@ -73,9 +73,13 @@ public class StreamService extends Service {
     }
 
     private static void logW(String message, Throwable t) {
+        if (t == null) {
+            log("W: " + message);
+            return;
+        }
         StringWriter sw = new StringWriter();
         t.printStackTrace(new PrintWriter(sw));
-        log("W: " + message + " — " + sw);
+        log("W: " + message + " - " + sw);
     }
 
     private MediaProjection projection;
@@ -472,6 +476,7 @@ public class StreamService extends Service {
 
         void start() {
             try {
+                log("audio pipeline starting");
                 AudioPlaybackCaptureConfiguration cfg =
                         new AudioPlaybackCaptureConfiguration.Builder(projection)
                                 .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
@@ -490,6 +495,20 @@ public class StreamService extends Service {
                         .setBufferSizeInBytes(Math.max(minBuf, 64 * 1024))
                         .setAudioPlaybackCaptureConfig(cfg)
                         .build();
+                log("audio record created, state=" + record.getState());
+                if (record.getState() != AudioRecord.STATE_INITIALIZED) {
+                    logW("audio record NOT initialized — capture unsupported on this ROM?", null);
+                    stop();
+                    return;
+                }
+                record.startRecording();
+                log("audio recording state=" + record.getRecordingState()
+                        + " (1=recording, 2 should be RECORDING after start)");
+                if (record.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
+                    logW("audio record failed to start recording", null);
+                    stop();
+                    return;
+                }
 
                 MediaFormat f = MediaFormat.createAudioFormat(
                         MediaFormat.MIMETYPE_AUDIO_AAC, 44100, 2);
@@ -507,19 +526,36 @@ public class StreamService extends Service {
                 drainThread = new Thread(this::drain, "pv-audio-out");
                 feedThread.start();
                 drainThread.start();
-            } catch (Throwable ignored) {
+            } catch (Throwable t) {
+                logW("audio pipeline start FAILED — no laptop sound this session", t);
                 stop();
             }
         }
 
         private void feed() {
             ByteBuffer buf = ByteBuffer.allocateDirect(4096);
+            int emptyReads = 0;
+            boolean warnedNoData = false;
             try {
                 while (running && !stopping) {
                     buf.clear();
                     int n = record.read(buf, buf.capacity());
-                    if (n < 0) break;
-                    if (n == 0) continue;
+                    if (n < 0) {
+                        logW("audio read error " + n + " (state=" + record.getRecordingState() + ")", null);
+                        break;
+                    }
+                    if (n == 0) {
+                        // Reads returning 0 with nothing playing are normal —
+                        // but if the movie is playing and we still get nothing,
+                        // the capture is denied. Say so once, loudly.
+                        if (!warnedNoData && ++emptyReads > 100) {
+                            warnedNoData = true;
+                            logW("audio capture yields no data (record state="
+                                    + record.getRecordingState() + ")", null);
+                        }
+                        continue;
+                    }
+                    emptyReads = 0;
 
                     int idx = encoder.dequeueInputBuffer(50_000);
                     if (idx < 0) continue;

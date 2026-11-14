@@ -44,7 +44,7 @@ public partial class MirrorPane : UserControl
     private DispatcherTimer? _streamAliveTimer;
     private ulong _lastDemuxBytes;
     private int _stallTicks;
-    private bool _voutNudged;
+    private int _nudgesLeft;
     // VLC renders straight into this borderless window's HWND — no WPF
     // airspace tricks, no LibVLCSharp overlay windows.
     private Window? _streamWindow;
@@ -394,7 +394,7 @@ public partial class MirrorPane : UserControl
         _streamMedia.AddOption(":network-caching=1500");
         _lastDemuxBytes = 0;
         _stallTicks = 0;
-        _voutNudged = false;
+        _nudgesLeft = 0;
         _streamPlayer!.Play(_streamMedia);
     }
 
@@ -407,22 +407,24 @@ public partial class MirrorPane : UserControl
         _streamAliveTimer?.Stop();
         _lastDemuxBytes = 0;
         _stallTicks = 0;
+        _nudgesLeft = 3;
         _streamAliveTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _streamAliveTimer.Tick += (_, _) =>
         {
             if (!_streaming) return;
 
-        // Once the video output exists, nudge the window by one pixel so VLC
-        // re-reads the real client size and re-places the video. This heals
-        // the rare race where the vout opened against a stale window size and
-        // rendered the picture tiny; the 400 ms size-sync timer restores the
-        // exact size a moment later.
-        if (!_voutNudged && _streamPlayer.VoutCount > 0)
+        // While the video output is fresh, nudge the window by one pixel a
+        // few times so VLC re-reads the real client size and re-places the
+        // video. One shot can fire too early (before VLC's sub-window
+        // exists); repeating over the first seconds heals the "tiny picture
+        // on the very first play" race for good. The 400 ms size-sync timer
+        // restores the exact size a moment after each nudge.
+        if (_nudgesLeft > 0 && _streamPlayer.VoutCount > 0)
         {
-            _voutNudged = true;
+            _nudgesLeft--;
             if (Native.GetWindowRect(_streamHwnd, out var rect))
             {
-                AppendMirrorLog($"stream: vout up ({_streamPlayer.VoutCount}) — re-place nudge");
+                AppendMirrorLog($"stream: vout re-place nudge ({_nudgesLeft} left)");
                 Native.SetWindowPos(_streamHwnd, IntPtr.Zero, 0, 0,
                     rect.Right - rect.Left, rect.Bottom - rect.Top - 1,
                     Native.SWP_NOMOVE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
