@@ -77,13 +77,18 @@ public partial class MirrorPane : UserControl
         }
     }
 
+    private static readonly object LogLock = new();
+
     private static void AppendMirrorLog(string line)
     {
         try
         {
             Directory.CreateDirectory(AppSettings.DataDir);
-            File.AppendAllText(Path.Combine(AppSettings.DataDir, "mirror.log"),
-                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {line}{Environment.NewLine}");
+            lock (LogLock)
+            {
+                File.AppendAllText(Path.Combine(AppSettings.DataDir, "mirror.log"),
+                    $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {line}{Environment.NewLine}");
+            }
         }
         catch
         {
@@ -203,7 +208,7 @@ public partial class MirrorPane : UserControl
 
         try
         {
-            _streamLibVlc ??= new LibVLC("--no-video-title-show");
+            _streamLibVlc ??= CreateStreamLibVlc();
             _streamPlayer ??= CreateStreamPlayer();
 
             // Attach the VideoView first — it needs to be loaded to host video.
@@ -248,6 +253,19 @@ public partial class MirrorPane : UserControl
                         "\n\nMake sure the PlayView Stream app is running on the phone (Start streaming) " +
                         "and the phone is connected (USB) or on the same Wi-Fi network.");
         }
+    }
+
+    /// <summary>VLC instance for the phone stream, with its own warnings and
+    /// errors mirrored into mirror.log — demux problems are named there.</summary>
+    private LibVLC CreateStreamLibVlc()
+    {
+        var lib = new LibVLC("--no-video-title-show", "--verbose=1");
+        lib.Log += (_, e) =>
+        {
+            if (e.Level >= LogLevel.Warning)
+                AppendMirrorLog("vlc: " + e.Message);
+        };
+        return lib;
     }
 
     private MediaPlayer CreateStreamPlayer()

@@ -68,8 +68,8 @@ final class TSMuxer {
         t[p++] = 0x00; t[p++] = 0x01; // program_number = 1
         t[p++] = (byte) (0xE0 | ((PMT_PID >> 8) & 0x1F));
         t[p++] = (byte) (PMT_PID & 0xFF);
-        writeSection(t, s, p);
-        writeTablePacket(t, p, 0x0000, 2); // PAT keeps its own continuity counter
+        writeSection(t, s, p); // fills section_length + CRC at t[p..p+4)
+        writeTablePacket(t, p + 4, 0x0000, 2); // PAT keeps its own continuity counter
     }
 
     private void writePmt() throws IOException {
@@ -97,7 +97,7 @@ final class TSMuxer {
         t[p++] = (byte) 0xF0; t[p++] = 0x00;
 
         writeSection(t, s, p);
-        writeTablePacket(t, p, PMT_PID, 3); // and the PMT its own
+        writeTablePacket(t, p + 4, PMT_PID, 3); // and the PMT its own
     }
 
     /** Fills the section_length field and appends the CRC32 at position p. */
@@ -112,15 +112,18 @@ final class TSMuxer {
         t[p++] = (byte) crc;
     }
 
-    private void writeTablePacket(byte[] t, int payloadLen, int pid, int ccIdx) throws IOException {
+    /** Emits one TS packet whose payload is the section at t[4..payloadEnd) —
+     *  the first 4 bytes of t are a placeholder for the TS header, not payload. */
+    private void writeTablePacket(byte[] t, int payloadEnd, int pid, int ccIdx) throws IOException {
         byte[] pk = new byte[188];
         pk[0] = 0x47;
         pk[1] = (byte) (0x40 | ((pid >> 8) & 0x1F)); // PUSI set
         pk[2] = (byte) (pid & 0xFF);
         pk[3] = (byte) (0x10 | (cc[ccIdx] & 0x0F));
         cc[ccIdx] = (cc[ccIdx] + 1) & 0x0F;
+        int payloadLen = payloadEnd - 4;
         int chunk = Math.min(184, payloadLen);
-        System.arraycopy(t, 0, pk, 4, chunk);
+        System.arraycopy(t, 4, pk, 4, chunk);
         for (int i = 4 + chunk; i < 188; i++) pk[i] = (byte) 0xFF;
         out.write(pk);
     }
@@ -148,16 +151,18 @@ final class TSMuxer {
         long pts = ptsUs * 9 / 100; // µs → 90 kHz
         pes[p++] = (byte) (0x21 | ((pts >> 29) & 0x0E));
         pes[p++] = (byte) ((pts >> 22) & 0xFF);
-        pes[p++] = (byte) (0x01 | ((pts >> 14) & 0xFF));
+        pes[p++] = (byte) (((pts >> 14) & 0xFE) | 0x01);
         pes[p++] = (byte) ((pts >> 7) & 0xFF);
-        pes[p++] = (byte) (0x01 | ((pts << 1) & 0xFF));
+        pes[p++] = (byte) (((pts << 1) & 0xFE) | 0x01);
         System.arraycopy(es, 0, pes, p, esLen);
         p += esLen;
 
         int pos = 0;
         boolean first = true;
         while (pos < p) {
-            int avail = (first && pcr) ? 176 : 184;
+            // A PCR adaptation field takes 14 bytes of header space
+            // (4 TS header + 1 AF length + 1 flags + 8 PCR) → payload ≤ 174.
+            int avail = (first && pcr) ? 174 : 184;
             int chunk = Math.min(avail, p - pos);
             emitPacket(pid, ccIdx, first, pes, pos, chunk, first && pcr, ptsUs);
             pos += chunk;
@@ -174,27 +179,28 @@ final class TSMuxer {
         pk[1] = (byte) ((pusi ? 0x40 : 0x00) | ((pid >> 8) & 0x1F));
         pk[2] = (byte) (pid & 0xFF);
 
-        boolean hasAf = withPcr || chunk < 184;
         int o = 4;
-        if (hasAf) {
-            int len = 183 - chunk; // bytes after the AF length byte
+        if (withPcr) {
+            // 1 length byte + 1 flags byte + 8 bytes PCR = 9 bytes of AF.
             pk[3] = (byte) (0x30 | (cc[ccIdx] & 0x0F));
+            pk[o++] = 9; // adaptation_field_length
+            pk[o++] = 0x10; // PCR flag
+            long pcr = (pcrUs * 9 / 100) & 0x1FFFFFFFFL;
+            pk[o++] = (byte) (pcr >>> 25);
+            pk[o++] = (byte) (pcr >>> 17);
+            pk[o++] = (byte) (pcr >>> 9);
+            pk[o++] = (byte) (pcr >>> 1);
+            pk[o++] = (byte) (((pcr & 1) << 7));
+            pk[o++] = 0x00; // extension = 0
+            pk[o++] = 0x00;
+            // o == 14; caller guarantees chunk ≤ 174.
+        } else if (chunk < 184) {
+            // Stuffing-only adaptation field: 1 length + 1 flags + (len-1) × 0xFF.
+            pk[3] = (byte) (0x30 | (cc[ccIdx] & 0x0F));
+            int len = 183 - chunk;
             pk[o++] = (byte) len;
-            if (withPcr) {
-                pk[o++] = 0x10; // PCR flag
-                long pcr = (pcrUs * 9 / 100) & 0x1FFFFFFFFL;
-                pk[o++] = (byte) (pcr >>> 25);
-                pk[o++] = (byte) (pcr >>> 17);
-                pk[o++] = (byte) (pcr >>> 9);
-                pk[o++] = (byte) (pcr >>> 1);
-                pk[o++] = (byte) (((pcr & 1) << 7));
-                pk[o++] = 0x00; // extension = 0
-                pk[o++] = 0x00;
-                for (; o < 4 + 1 + len; o++) pk[o] = (byte) 0xFF;
-            } else {
-                pk[o++] = 0x00; // no optional fields, pure stuffing
-                for (; o < 4 + 1 + len; o++) pk[o] = (byte) 0xFF;
-            }
+            pk[o++] = 0x00; // flags: nothing optional
+            for (int i = 0; i < len - 1; i++) pk[o++] = (byte) 0xFF;
         } else {
             pk[3] = (byte) (0x10 | (cc[ccIdx] & 0x0F));
         }
