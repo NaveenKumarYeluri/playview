@@ -65,7 +65,7 @@ public class StreamService extends Service {
             new SimpleDateFormat("HH:mm:ss.SSS", Locale.US);
 
     private static void log(String message) {
-        log(message);
+        Log.i(TAG, message);
         synchronized (LOG_LOCK) {
             LOGS.addLast(LOG_TIME.format(new Date()) + "  " + message);
             while (LOGS.size() > 400) LOGS.removeFirst();
