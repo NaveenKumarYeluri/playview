@@ -40,6 +40,11 @@ public partial class MirrorPane : UserControl
     private string? _streamUrl;
     private int _streamRestarts;
     private bool _bufferLow = true;
+    private Media? _streamMedia;          // kept alive so Statistics stay readable
+    private DispatcherTimer? _streamAliveTimer;
+    private ulong _lastDemuxBytes;
+    private int _stallTicks;
+    private bool _voutNudged;
     // VLC renders straight into this borderless window's HWND — no WPF
     // airspace tricks, no LibVLCSharp overlay windows.
     private Window? _streamWindow;
@@ -273,6 +278,7 @@ public partial class MirrorPane : UserControl
 
             _streamUrl = url;
             PlayStreamMedia();
+            StartStreamAliveWatch();
 
             StatusMessage = "Streaming from the phone through VLC's engine.";
 
@@ -310,7 +316,20 @@ public partial class MirrorPane : UserControl
         lib.Log += (_, e) =>
         {
             if (e.Level >= LogLevel.Notice)
+            {
                 AppendMirrorLog("vlc: " + e.Message);
+            }
+            else
+            {
+                // Debug lines are filtered to the display pipeline — that's
+                // where resize/swapchain problems show up. Everything else
+                // would drown the log (Lua probes, per-packet demux spam).
+                var m = e.Message;
+                if (m.Contains("vout") || m.Contains("Vout") || m.Contains("d3d11") ||
+                    m.Contains("Direct3D") || m.Contains("swapchain") || m.Contains("resize") ||
+                    m.Contains("Detected") || m.Contains("sub-window"))
+                    AppendMirrorLog("vlc·: " + m);
+            }
         };
         return lib;
     }
@@ -367,11 +386,76 @@ public partial class MirrorPane : UserControl
 
     private void PlayStreamMedia()
     {
-        using var media = new Media(_streamLibVlc!, new Uri(_streamUrl!));
+        // Keep our own reference — Statistics (bytes read) are read every
+        // second by the liveness watch below.
+        _streamMedia = new Media(_streamLibVlc!, new Uri(_streamUrl!));
         // A live stream whose data trickles in (static screen) needs a real
         // buffer — VLC's default is far too tight for it.
-        media.AddOption(":network-caching=1500");
-        _streamPlayer!.Play(media);
+        _streamMedia.AddOption(":network-caching=1500");
+        _lastDemuxBytes = 0;
+        _stallTicks = 0;
+        _voutNudged = false;
+        _streamPlayer!.Play(_streamMedia);
+    }
+
+    /// <summary>Watches the stream's input: the phone always sends something
+    /// (keepalive packets every 250 ms even on a static screen), so if VLC's
+    /// demuxer stops reading bytes while claiming to play, the connection is
+    /// dead — VLC 3.0 itself never notices a closed socket.</summary>
+    private void StartStreamAliveWatch()
+    {
+        _streamAliveTimer?.Stop();
+        _lastDemuxBytes = 0;
+        _stallTicks = 0;
+        _streamAliveTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _streamAliveTimer.Tick += (_, _) =>
+        {
+            if (!_streaming) return;
+
+        // Once the video output exists, nudge the window by one pixel so VLC
+        // re-reads the real client size and re-places the video. This heals
+        // the rare race where the vout opened against a stale window size and
+        // rendered the picture tiny; the 400 ms size-sync timer restores the
+        // exact size a moment later.
+        if (!_voutNudged && _streamPlayer.VoutCount > 0)
+        {
+            _voutNudged = true;
+            if (Native.GetWindowRect(_streamHwnd, out var rect))
+            {
+                AppendMirrorLog($"stream: vout up ({_streamPlayer.VoutCount}) — re-place nudge");
+                Native.SetWindowPos(_streamHwnd, IntPtr.Zero, 0, 0,
+                    rect.Right - rect.Left, rect.Bottom - rect.Top - 1,
+                    Native.SWP_NOMOVE | Native.SWP_NOZORDER | Native.SWP_NOACTIVATE);
+            }
+        }
+
+        ulong bytes = 0;
+        try
+        {
+            var st = _streamMedia?.Statistics;
+            if (st.HasValue) bytes = Convert.ToUInt64(st.Value.DemuxReadBytes);
+        }
+        catch { }
+
+        if (bytes == _lastDemuxBytes && _streamPlayer is { State: VLCState.Playing })
+        {
+            _stallTicks++;
+            if (_stallTicks == 5)
+                AppendMirrorLog("stream: no new bytes for 5 s…");
+            if (_stallTicks >= 10)
+            {
+                AppendMirrorLog("stream: input stalled 10 s — treating as ended");
+                _stallTicks = 0;
+                OnStreamEnded();
+            }
+        }
+        else
+        {
+            _stallTicks = 0;
+            _lastDemuxBytes = bytes;
+        }
+    };
+        _streamAliveTimer.Start();
     }
 
     /// <summary>Reports a stream problem without yanking the user back to setup —
@@ -434,6 +518,7 @@ public partial class MirrorPane : UserControl
         }
 
         _streaming = false;
+        _streamAliveTimer?.Stop();
         // Stop can block on VLC's threads — do it off the UI thread so the
         // pane never freezes while VLC winds down.
         var player = _streamPlayer;
@@ -937,11 +1022,20 @@ public partial class MirrorPane : UserControl
 
     // ── Stop / teardown ──────────────────────────────────────────────────
 
-    private async void OnStopMirror(object sender, RoutedEventArgs e)
+    private void OnStopMirror(object sender, RoutedEventArgs e)
     {
+        // During streaming the ⏹ must end the STREAM (hide the floating video
+        // window too) — the old code only killed scrcpy and left the stream
+        // window floating over the whole app, blocking every click.
+        if (_streaming)
+        {
+            EndStreamUi("Stream stopped.");
+            return;
+        }
+
         StatusMessage = "Stopping mirror…";
         StopMirrorCore();
-        await KillDeviceServerAsync();
+        _ = KillDeviceServerAsync();
         ResetMirrorUi("Mirror stopped.");
     }
 
