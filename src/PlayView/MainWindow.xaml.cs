@@ -3,6 +3,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using LibVLCSharp.Shared;
 using Microsoft.Win32;
@@ -320,6 +321,16 @@ public partial class MainWindow : Window
 
     // ── Fullscreen ──────────────────────────────────────────────────────────
 
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out Win32Point lpPoint);
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct Win32Point { public int X; public int Y; }
+
+    private Win32Point _lastMousePos;
+    private int _mouseIdleTicks;
+
     private void OnToggleFullscreen(object sender, RoutedEventArgs e) => ToggleFullscreen();
 
     public void ToggleFullscreen()
@@ -338,10 +349,12 @@ public partial class MainWindow : Window
             MenuBar.Visibility = Visibility.Collapsed;
             SidebarColumn.Width = new GridLength(0);
 
-            // 2. Remove WindowChrome to prevent caption reserved space / borders
-            System.Windows.Shell.WindowChrome.SetWindowChrome(this, null);
+            // 2. Adjust WindowChrome: zero caption and borders so no DWM 10px gray frame is drawn!
+            WindowChromeInst.CaptionHeight = 0;
+            WindowChromeInst.ResizeBorderThickness = new Thickness(0);
 
-            // 3. Edge-to-edge window style
+            // 3. True edge-to-edge fullscreen covering taskbar & floating desktop widgets
+            Topmost = true;
             ResizeMode = ResizeMode.NoResize;
             WindowStyle = WindowStyle.None;
             WindowState = WindowState.Normal;
@@ -355,9 +368,11 @@ public partial class MainWindow : Window
             StopFullscreenAutoHide();
 
             // 1. Restore WindowChrome
-            System.Windows.Shell.WindowChrome.SetWindowChrome(this, WindowChromeInst);
+            WindowChromeInst.CaptionHeight = 34;
+            WindowChromeInst.ResizeBorderThickness = new Thickness(6);
 
-            // 2. Restore window style and state
+            // 2. Restore window style, topmost and state
+            Topmost = false;
             WindowStyle = _prevStyle;
             ResizeMode = _prevResize;
             WindowState = _prevState;
@@ -375,12 +390,52 @@ public partial class MainWindow : Window
     private void StartFullscreenAutoHide()
     {
         _fullscreenTimer?.Stop();
-        _fullscreenTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.5) };
+        _mouseIdleTicks = 0;
+        GetCursorPos(out _lastMousePos);
+
+        _fullscreenTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
         _fullscreenTimer.Tick += (_, _) =>
         {
-            if (_fullscreen && !TransportBar.IsMouseOver)
+            if (!_fullscreen) return;
+
+            if (GetCursorPos(out var currentPos))
             {
-                TransportBar.Visibility = Visibility.Collapsed;
+                bool moved = Math.Abs(currentPos.X - _lastMousePos.X) > 2 || Math.Abs(currentPos.Y - _lastMousePos.Y) > 2;
+                if (moved)
+                {
+                    _lastMousePos = currentPos;
+                    _mouseIdleTicks = 0;
+                    if (TransportBar.Visibility != Visibility.Visible)
+                        TransportBar.Visibility = Visibility.Visible;
+                    return;
+                }
+
+                // If cursor is physically over TransportBar, keep controls visible
+                if (TransportBar.IsVisible)
+                {
+                    try
+                    {
+                        var origin = TransportBar.PointToScreen(new Point(0, 0));
+                        var dpi = VisualTreeHelper.GetDpi(this);
+                        var barRect = new Rect(origin.X, origin.Y,
+                            TransportBar.ActualWidth * dpi.DpiScaleX,
+                            TransportBar.ActualHeight * dpi.DpiScaleY);
+                        if (barRect.Contains(new Point(currentPos.X, currentPos.Y)))
+                        {
+                            _mouseIdleTicks = 0;
+                            return;
+                        }
+                    }
+                    catch { }
+                }
+            }
+
+            _mouseIdleTicks++;
+            // 25 ticks of 100ms = 2.5s of stillness
+            if (_mouseIdleTicks >= 25 && !_sliderDragging)
+            {
+                if (TransportBar.Visibility != Visibility.Collapsed)
+                    TransportBar.Visibility = Visibility.Collapsed;
             }
         };
         _fullscreenTimer.Start();
@@ -398,10 +453,9 @@ public partial class MainWindow : Window
         base.OnPreviewMouseMove(e);
         if (_fullscreen && (_activeId == "local" || _activeId == "mirror"))
         {
+            _mouseIdleTicks = 0;
             if (TransportBar.Visibility != Visibility.Visible)
                 TransportBar.Visibility = Visibility.Visible;
-            _fullscreenTimer?.Stop();
-            _fullscreenTimer?.Start();
         }
     }
 

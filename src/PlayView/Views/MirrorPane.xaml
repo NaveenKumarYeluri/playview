@@ -89,11 +89,14 @@
         </DockPanel>
 
         <Border Background="#202024" BorderBrush="{StaticResource Brush.Border}" BorderThickness="1"
-                CornerRadius="6" Padding="14,10" Margin="0,18,0,0">
+                CornerRadius="6" Padding="14,12" Margin="0,18,0,0">
           <StackPanel>
-            <TextBlock Text="🎧 Audio Note (Android 9 / API 28):" FontWeight="SemiBold" Foreground="{StaticResource Brush.Text}" FontSize="12"/>
-            <TextBlock Text="Android 9 does not allow user apps to capture internal device audio. For crystal-clear sound with zero microphone noise, pair your phone to this laptop via Bluetooth Audio (Windows will act as a wireless speaker). You can stream video over USB or Wi-Fi simultaneously!"
-                       Foreground="{StaticResource Brush.SubText}" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="17"/>
+            <TextBlock Text="🎧 Audio on Laptop (Android 9 / Pie):" FontWeight="SemiBold" Foreground="{StaticResource Brush.Text}" FontSize="13"/>
+            <TextBlock Foreground="{StaticResource Brush.SubText}" FontSize="12" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="18">
+              • <Bold Foreground="{StaticResource Brush.Text}">Why no sound via Bluetooth by default:</Bold> Windows 10/11 pairs your phone as an audio source, but Windows does not route the sound to the laptop speakers without opening the A2DP stream.<LineBreak/>
+              • <Bold Foreground="{StaticResource Brush.Text}">How to hear Bluetooth sound:</Bold> Install the free <Bold Foreground="#88C0D0">"Bluetooth Audio Receiver"</Bold> app from Microsoft Store. Open it, select your phone, and click <Bold Foreground="#A3BE8C">"Open Connection"</Bold> — all audio from your phone will immediately play through your laptop speakers with crystal clarity!<LineBreak/>
+              • <Bold Foreground="{StaticResource Brush.Text}">Microphone option:</Bold> If you prefer not to use Bluetooth, open the PlayView Stream app on your phone, check "Capture audio via Microphone", and tap Start streaming.
+            </TextBlock>
           </StackPanel>
         </Border>
 
