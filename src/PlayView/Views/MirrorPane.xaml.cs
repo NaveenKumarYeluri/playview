@@ -394,9 +394,14 @@ public partial class MirrorPane : UserControl
         // Keep our own reference — Statistics (bytes read) are read every
         // second by the liveness watch below.
         _streamMedia = new Media(_streamLibVlc!, new Uri(_streamUrl!));
-        // A live stream whose data trickles in (static screen) needs a real
-        // buffer — VLC's default is far too tight for it.
-        _streamMedia.AddOption(":network-caching=1500");
+        // Low-latency caching: 150 ms for USB loopback, 350 ms for Wi-Fi.
+        // Keeps video in tight sync with Bluetooth audio!
+        var isUsb = _streamUrl?.Contains("127.0.0.1") == true;
+        int caching = isUsb ? 150 : 350;
+        _streamMedia.AddOption($":network-caching={caching}");
+        _streamMedia.AddOption($":live-caching={caching}");
+        _streamMedia.AddOption(":clock-jitter=0");
+        _streamMedia.AddOption(":clock-synchro=0");
         _lastDemuxBytes = 0;
         _stallTicks = 0;
         _streamPlayer!.Play(_streamMedia);
@@ -460,6 +465,7 @@ public partial class MirrorPane : UserControl
 
     private void OnStreamStop(object sender, RoutedEventArgs e)
     {
+        _ = SendMediaStopAsync();
         try { if (_streamPlayer is { IsPlaying: true }) _streamPlayer.Stop(); }
         catch { /* already stopped */ }
         EndStreamUi("Stream stopped.");
@@ -902,8 +908,33 @@ public partial class MirrorPane : UserControl
     public bool IsPanelActive => MirrorPanel.Visibility == Visibility.Visible;
     public bool IsPlaying => _streamPlayer is { State: VLCState.Playing };
 
-    public async void TogglePlayPause() => await SendKeyEvent(85);
-    public void Stop() => OnStopMirror(this, new RoutedEventArgs());
+    public async void Play()
+    {
+        if (_streamPlayer is { State: VLCState.Paused })
+            _streamPlayer.Play();
+        await SendMediaPlayAsync();
+    }
+
+    public async void Pause()
+    {
+        if (_streamPlayer is { State: VLCState.Playing })
+            _streamPlayer.Pause();
+        await SendMediaPauseAsync();
+    }
+
+    public void TogglePlayPause()
+    {
+        if (IsPlaying)
+            Pause();
+        else
+            Play();
+    }
+
+    public void Stop()
+    {
+        _ = SendMediaStopAsync();
+        OnStopMirror(this, new RoutedEventArgs());
+    }
 
     public async void SeekRelative(long deltaMs)
     {
@@ -925,6 +956,42 @@ public partial class MirrorPane : UserControl
     {
         if (_streamPlayer != null)
             _streamPlayer.Volume = vol;
+
+        if (_adb != null)
+        {
+            int adbVol = Math.Clamp((int)Math.Round(vol * 15.0 / 100.0), 0, 15);
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await ScrcpyService.RunAdbAsync(_adb, $"shell media volume --stream 3 --set {adbVol}");
+                }
+                catch { }
+            });
+        }
+    }
+
+    public async Task SendMediaStopAsync()
+    {
+        if (_adb == null) return;
+        try { await ScrcpyService.RunAdbAsync(_adb, "shell media dispatch stop"); } catch { }
+        try { await ScrcpyService.RunAdbAsync(_adb, "shell media dispatch pause"); } catch { }
+        try { await ScrcpyService.RunAdbAsync(_adb, "shell input keyevent 86"); } catch { }
+        try { await ScrcpyService.RunAdbAsync(_adb, "shell input keyevent 127"); } catch { }
+    }
+
+    public async Task SendMediaPauseAsync()
+    {
+        if (_adb == null) return;
+        try { await ScrcpyService.RunAdbAsync(_adb, "shell media dispatch pause"); } catch { }
+        try { await ScrcpyService.RunAdbAsync(_adb, "shell input keyevent 127"); } catch { }
+    }
+
+    public async Task SendMediaPlayAsync()
+    {
+        if (_adb == null) return;
+        try { await ScrcpyService.RunAdbAsync(_adb, "shell media dispatch play"); } catch { }
+        try { await ScrcpyService.RunAdbAsync(_adb, "shell input keyevent 126"); } catch { }
     }
 
     private void OnPlayPauseKey(object sender, RoutedEventArgs e) => TogglePlayPause();
@@ -1034,6 +1101,7 @@ public partial class MirrorPane : UserControl
 
     private void OnStopMirror(object sender, RoutedEventArgs e)
     {
+        _ = SendMediaStopAsync();
         // During streaming the ⏹ must end the STREAM (hide the floating video
         // window too) — the old code only killed scrcpy and left the stream
         // window floating over the whole app, blocking every click.
@@ -1051,6 +1119,7 @@ public partial class MirrorPane : UserControl
 
     public void ReturnToSetup()
     {
+        _ = SendMediaPauseAsync();
         if (_streaming)
         {
             StreamVideo.Visibility = Visibility.Collapsed;
@@ -1139,6 +1208,7 @@ public partial class MirrorPane : UserControl
 
     public void ShutdownMirror()
     {
+        _ = SendMediaPauseAsync();
         try
         {
             if (_scrcpyHwnd != IntPtr.Zero)

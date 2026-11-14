@@ -112,10 +112,12 @@
             <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
 
-          <!-- Left: Play/Pause, Stop, Prev/Next, and Phone Remote buttons -->
+          <!-- Left: Play, Pause, Stop, Prev/Next, and Phone Remote buttons -->
           <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-            <Button x:Name="PlayPauseBtn" Style="{StaticResource TransportButton}"
-                    Content="▶" FontFamily="Segoe UI Symbol" Click="OnPlayPause" ToolTip="Play / Pause (Space)"/>
+            <Button x:Name="PlayBtn" Style="{StaticResource TransportButton}"
+                    Content="▶" FontFamily="Segoe UI Symbol" Click="OnPlay" ToolTip="Play (Space)"/>
+            <Button x:Name="PauseBtn" Style="{StaticResource TransportButton}" Margin="4,0,0,0"
+                    Content="⏸" FontFamily="Segoe UI Symbol" Click="OnPause" ToolTip="Pause (Space)"/>
             <Button x:Name="StopBtn" Style="{StaticResource TransportButton}" Margin="4,0,0,0"
                     Content="⏹" FontFamily="Segoe UI Symbol" Click="OnStop" ToolTip="Stop"/>
             <Button Style="{StaticResource TransportButton}" Margin="4,0,0,0"

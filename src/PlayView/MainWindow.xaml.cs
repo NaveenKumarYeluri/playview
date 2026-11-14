@@ -1,8 +1,10 @@
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using LibVLCSharp.Shared;
@@ -47,6 +49,41 @@ public partial class MainWindow : Window
             PlayerView.Shutdown();
             MirrorView.ShutdownMirror();
         };
+    }
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        if (PresentationSource.FromVisual(this) is HwndSource source)
+        {
+            source.AddHook(WndProcHook);
+        }
+    }
+
+    private IntPtr WndProcHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        const int WM_GETMINMAXINFO = 0x0024;
+        if (msg == WM_GETMINMAXINFO && _fullscreen)
+        {
+            var mmi = Marshal.PtrToStructure<Native.MINMAXINFO>(lParam);
+            var hMonitor = Native.MonitorFromWindow(hwnd, Native.MONITOR_DEFAULTTONEAREST);
+            if (hMonitor != IntPtr.Zero)
+            {
+                var mi = new Native.MONITORINFO { cbSize = (uint)Marshal.SizeOf<Native.MONITORINFO>() };
+                if (Native.GetMonitorInfoW(hMonitor, ref mi))
+                {
+                    mmi.ptMaxPosition.X = mi.rcMonitor.Left;
+                    mmi.ptMaxPosition.Y = mi.rcMonitor.Top;
+                    mmi.ptMaxSize.X = mi.rcMonitor.Right - mi.rcMonitor.Left;
+                    mmi.ptMaxSize.Y = mi.rcMonitor.Bottom - mi.rcMonitor.Top;
+                    mmi.ptMaxTrackSize.X = mmi.ptMaxSize.X;
+                    mmi.ptMaxTrackSize.Y = mmi.ptMaxSize.Y;
+                    Marshal.StructureToPtr(mmi, lParam, true);
+                    handled = true;
+                }
+            }
+        }
+        return IntPtr.Zero;
     }
 
     // ── Sidebar ─────────────────────────────────────────────────────────────
@@ -131,9 +168,14 @@ public partial class MainWindow : Window
 
     private void UpdateTransport()
     {
+        var accentBrush = (Brush)FindResource("Brush.Accent");
+        var textBrush = (Brush)FindResource("Brush.Text");
+
         if (_activeId == "mirror")
         {
-            PlayPauseBtn.Content = MirrorView.IsPlaying ? "⏸" : "▶";
+            bool isPlaying = MirrorView.IsPlaying;
+            PlayBtn.Foreground = isPlaying ? accentBrush : textBrush;
+            PauseBtn.Foreground = !isPlaying ? accentBrush : textBrush;
             TimeText.Text = MirrorView.IsStreaming ? "LIVE" : "READY";
             StatusLabel.Text = MirrorView.StreamStatusText;
             ProgressSlider.IsEnabled = false;
@@ -147,7 +189,9 @@ public partial class MainWindow : Window
         var mp = PlayerView.Player;
         if (mp == null) return;
 
-        PlayPauseBtn.Content = mp.State == VLCState.Playing ? "⏸" : "▶";
+        bool localPlaying = mp.State == VLCState.Playing;
+        PlayBtn.Foreground = localPlaying ? accentBrush : textBrush;
+        PauseBtn.Foreground = !localPlaying ? accentBrush : textBrush;
 
         if (_sliderDragging) return;
 
@@ -204,6 +248,18 @@ public partial class MainWindow : Window
             MirrorView.SetVolume((int)VolumeSlider.Value);
         if (MuteBtn != null)
             MuteBtn.Content = VolumeSlider.Value == 0 ? "🔇" : "🔊";
+    }
+
+    private void OnPlay(object sender, RoutedEventArgs e)
+    {
+        if (_activeId == "mirror") MirrorView.Play();
+        else PlayerView.Play();
+    }
+
+    private void OnPause(object sender, RoutedEventArgs e)
+    {
+        if (_activeId == "mirror") MirrorView.Pause();
+        else PlayerView.Pause();
     }
 
     private void OnPlayPause(object sender, RoutedEventArgs e)
@@ -359,6 +415,22 @@ public partial class MainWindow : Window
             WindowStyle = WindowStyle.None;
             WindowState = WindowState.Normal;
             WindowState = WindowState.Maximized;
+
+            // Explicitly force monitor bounds via SetWindowPos to guarantee Taskbar is completely covered
+            var hwnd = new WindowInteropHelper(this).Handle;
+            var hMonitor = Native.MonitorFromWindow(hwnd, Native.MONITOR_DEFAULTTONEAREST);
+            if (hMonitor != IntPtr.Zero)
+            {
+                var mi = new Native.MONITORINFO { cbSize = (uint)Marshal.SizeOf<Native.MONITORINFO>() };
+                if (Native.GetMonitorInfoW(hMonitor, ref mi))
+                {
+                    Native.SetWindowPos(hwnd, Native.HWND_TOPMOST,
+                        mi.rcMonitor.Left, mi.rcMonitor.Top,
+                        mi.rcMonitor.Right - mi.rcMonitor.Left,
+                        mi.rcMonitor.Bottom - mi.rcMonitor.Top,
+                        Native.SWP_SHOWWINDOW);
+                }
+            }
 
             StartFullscreenAutoHide();
         }

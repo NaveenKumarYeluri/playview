@@ -69,6 +69,25 @@ public partial class PlayerPane : UserControl
         }
     }
 
+    public void Play()
+    {
+        if (Player.State == VLCState.Paused)
+        {
+            Player.Play();
+        }
+        else if (Player.State != VLCState.Playing)
+        {
+            if (_playlist.Count > 0 && (_index < 0 || _index >= _playlist.Count)) _index = 0;
+            if (_index >= 0) PlayCurrent();
+        }
+    }
+
+    public void Pause()
+    {
+        if (Player.State == VLCState.Playing)
+            Player.Pause();
+    }
+
     public void TogglePlayPause()
     {
         switch (Player.State)
