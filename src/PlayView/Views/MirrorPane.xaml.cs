@@ -272,6 +272,19 @@ public partial class MirrorPane : UserControl
             StreamVideo.Visibility = Visibility.Visible;
             MirrorHost.Visibility = Visibility.Collapsed;
 
+            // Commit layout updates for StreamVideo before passing it to LibVLC.
+            // If LibVLC initializes its D3D11 swapchain into an unarranged (0x0) window,
+            // the video renders tiny and crashes the vout thread after 1 second!
+            UpdateLayout();
+            MirrorPanel.UpdateLayout();
+            StreamVideo.UpdateLayout();
+
+            for (int i = 0; i < 30 && (StreamVideo.ActualWidth < 50 || StreamVideo.ActualHeight < 50); i++)
+            {
+                await Task.Delay(20);
+                UpdateLayout();
+            }
+
             StreamVideo.MediaPlayer = _streamPlayer;
             _mirrorTitle = "Streaming — connecting…";
             _streaming = true;
@@ -316,8 +329,13 @@ public partial class MirrorPane : UserControl
         // fail silently when the video renders into a custom HwndHost child
         // window (our PlayViewMirrorHost), leaving the stream with picture
         // but no sound.
-        var lib = new LibVLC("--no-video-title-show", "--verbose=2",
-                             "--aout=directsound");
+        // Disable late frame dropping and frame skipping so clock drift never stalls the live stream.
+        var lib = new LibVLC(
+            "--no-video-title-show",
+            "--verbose=2",
+            "--aout=directsound",
+            "--no-drop-late-frames",
+            "--no-skip-frames");
         lib.Log += (_, e) =>
         {
             if (e.Level >= LogLevel.Notice)
@@ -393,15 +411,16 @@ public partial class MirrorPane : UserControl
     {
         // Keep our own reference — Statistics (bytes read) are read every
         // second by the liveness watch below.
+        try { _streamMedia?.Dispose(); } catch { }
         _streamMedia = new Media(_streamLibVlc!, new Uri(_streamUrl!));
-        // Low-latency caching: 150 ms for USB loopback, 350 ms for Wi-Fi.
-        // Keeps video in tight sync with Bluetooth audio!
+        // Balanced low-latency caching: 400 ms on USB, 600 ms on Wi-Fi.
+        // Absorbs encoder bursts and USB transmission jitter without stuttering,
+        // and keeps video tightly synced with Bluetooth audio.
         var isUsb = _streamUrl?.Contains("127.0.0.1") == true;
-        int caching = isUsb ? 150 : 350;
+        int caching = isUsb ? 400 : 600;
         _streamMedia.AddOption($":network-caching={caching}");
         _streamMedia.AddOption($":live-caching={caching}");
-        _streamMedia.AddOption(":clock-jitter=0");
-        _streamMedia.AddOption(":clock-synchro=0");
+        _streamMedia.AddOption(":clock-jitter=500");
         _lastDemuxBytes = 0;
         _stallTicks = 0;
         _streamPlayer!.Play(_streamMedia);

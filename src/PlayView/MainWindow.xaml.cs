@@ -25,6 +25,10 @@ public partial class MainWindow : Window
     private WindowState _prevState = WindowState.Normal;
     private WindowStyle _prevStyle = WindowStyle.SingleBorderWindow;
     private ResizeMode _prevResize = ResizeMode.CanResize;
+    private double _prevLeft;
+    private double _prevTop;
+    private double _prevWidth;
+    private double _prevHeight;
     private DispatcherTimer? _fullscreenTimer;
     private bool _sliderDragging;
 
@@ -396,6 +400,10 @@ public partial class MainWindow : Window
             _prevState = WindowState;
             _prevStyle = WindowStyle;
             _prevResize = ResizeMode;
+            _prevLeft = Left;
+            _prevTop = Top;
+            _prevWidth = Width;
+            _prevHeight = Height;
             _fullscreen = true;
 
             // 1. Hide TitleBar, MenuBar, Sidebar
@@ -405,32 +413,39 @@ public partial class MainWindow : Window
             MenuBar.Visibility = Visibility.Collapsed;
             SidebarColumn.Width = new GridLength(0);
 
-            // 2. Adjust WindowChrome: zero caption and borders so no DWM 10px gray frame is drawn!
-            WindowChromeInst.CaptionHeight = 0;
-            WindowChromeInst.ResizeBorderThickness = new Thickness(0);
+            // 2. Detach WindowChrome so it doesn't intercept or clip to taskbar work area
+            System.Windows.Shell.WindowChrome.SetWindowChrome(this, null);
 
-            // 3. True edge-to-edge fullscreen covering taskbar & floating desktop widgets
-            Topmost = true;
-            ResizeMode = ResizeMode.NoResize;
-            WindowStyle = WindowStyle.None;
-            WindowState = WindowState.Normal;
-            WindowState = WindowState.Maximized;
-
-            // Explicitly force monitor bounds via SetWindowPos to guarantee Taskbar is completely covered
+            // 3. Obtain monitor bounds for the window's current monitor
             var hwnd = new WindowInteropHelper(this).Handle;
             var hMonitor = Native.MonitorFromWindow(hwnd, Native.MONITOR_DEFAULTTONEAREST);
-            if (hMonitor != IntPtr.Zero)
-            {
-                var mi = new Native.MONITORINFO { cbSize = (uint)Marshal.SizeOf<Native.MONITORINFO>() };
-                if (Native.GetMonitorInfoW(hMonitor, ref mi))
-                {
-                    Native.SetWindowPos(hwnd, Native.HWND_TOPMOST,
-                        mi.rcMonitor.Left, mi.rcMonitor.Top,
-                        mi.rcMonitor.Right - mi.rcMonitor.Left,
-                        mi.rcMonitor.Bottom - mi.rcMonitor.Top,
-                        Native.SWP_SHOWWINDOW);
-                }
-            }
+            var mi = new Native.MONITORINFO { cbSize = (uint)Marshal.SizeOf<Native.MONITORINFO>() };
+            Native.GetMonitorInfoW(hMonitor, ref mi);
+
+            var dpi = VisualTreeHelper.GetDpi(this);
+            double monX = mi.rcMonitor.Left / dpi.DpiScaleX;
+            double monY = mi.rcMonitor.Top / dpi.DpiScaleY;
+            double monW = (mi.rcMonitor.Right - mi.rcMonitor.Left) / dpi.DpiScaleX;
+            double monH = (mi.rcMonitor.Bottom - mi.rcMonitor.Top) / dpi.DpiScaleY;
+
+            // 4. True edge-to-edge fullscreen as a topmost normal window.
+            // Keeping WindowState = Normal prevents Windows Explorer / DWM from clipping to the taskbar!
+            WindowState = WindowState.Normal;
+            WindowStyle = WindowStyle.None;
+            ResizeMode = ResizeMode.NoResize;
+            Topmost = true;
+
+            Left = monX;
+            Top = monY;
+            Width = monW;
+            Height = monH;
+
+            // Force topmost and exact physical monitor coordinates via Win32 SetWindowPos
+            Native.SetWindowPos(hwnd, Native.HWND_TOPMOST,
+                mi.rcMonitor.Left, mi.rcMonitor.Top,
+                mi.rcMonitor.Right - mi.rcMonitor.Left,
+                mi.rcMonitor.Bottom - mi.rcMonitor.Top,
+                Native.SWP_SHOWWINDOW | Native.SWP_FRAMECHANGED);
 
             StartFullscreenAutoHide();
         }
@@ -439,15 +454,24 @@ public partial class MainWindow : Window
             _fullscreen = false;
             StopFullscreenAutoHide();
 
-            // 1. Restore WindowChrome
-            WindowChromeInst.CaptionHeight = 34;
-            WindowChromeInst.ResizeBorderThickness = new Thickness(6);
-
-            // 2. Restore window style, topmost and state
+            // 1. Restore style and window state
             Topmost = false;
             WindowStyle = _prevStyle;
             ResizeMode = _prevResize;
             WindowState = _prevState;
+
+            if (_prevState == WindowState.Normal)
+            {
+                Left = _prevLeft;
+                Top = _prevTop;
+                Width = _prevWidth;
+                Height = _prevHeight;
+            }
+
+            // 2. Re-attach WindowChrome
+            System.Windows.Shell.WindowChrome.SetWindowChrome(this, WindowChromeInst);
+            WindowChromeInst.CaptionHeight = 34;
+            WindowChromeInst.ResizeBorderThickness = new Thickness(6);
 
             // 3. Restore TitleBar, MenuBar, Sidebar
             TitleBarRow.Height = new GridLength(34);
@@ -456,6 +480,10 @@ public partial class MainWindow : Window
             MenuBar.Visibility = Visibility.Visible;
             SidebarColumn.Width = _settings.ShowSidebar ? new GridLength(180) : new GridLength(0);
             TransportBar.Visibility = (_activeId == "local" || _activeId == "mirror") ? Visibility.Visible : Visibility.Collapsed;
+
+            var hwnd = new WindowInteropHelper(this).Handle;
+            Native.SetWindowPos(hwnd, Native.HWND_NOTOPMOST, 0, 0, 0, 0,
+                Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_SHOWWINDOW | Native.SWP_FRAMECHANGED);
         }
     }
 
