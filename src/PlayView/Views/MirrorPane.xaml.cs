@@ -245,6 +245,11 @@ public partial class MirrorPane : UserControl
                         "Make sure the phone app says \"Streaming\" (Start streaming), then try again.";
                     AppendMirrorLog("stream: no data after 10 s (state: " + _streamPlayer.State + ")");
                 }
+                else if (_streaming)
+                {
+                    AppendMirrorLog($"stream: 10 s check — state {_streamPlayer.State}, " +
+                        $"video outputs: {_streamPlayer.VoutCount}");
+                }
             }));
         }
         catch (Exception ex)
@@ -256,14 +261,14 @@ public partial class MirrorPane : UserControl
         }
     }
 
-    /// <summary>VLC instance for the phone stream, with its own warnings and
-    /// errors mirrored into mirror.log — demux problems are named there.</summary>
+    /// <summary>VLC instance for the phone stream, with its own log mirrored
+    /// into mirror.log — decoder/display problems are named there.</summary>
     private LibVLC CreateStreamLibVlc()
     {
-        var lib = new LibVLC("--no-video-title-show", "--verbose=1");
+        var lib = new LibVLC("--no-video-title-show", "--verbose=2");
         lib.Log += (_, e) =>
         {
-            if (e.Level >= LogLevel.Warning)
+            if (e.Level >= LogLevel.Notice)
                 AppendMirrorLog("vlc: " + e.Message);
         };
         return lib;
@@ -696,6 +701,19 @@ public partial class MirrorPane : UserControl
         var panePixelH = (int)Math.Round(paneH * dpi);
         var x = (int)topLeft.X;
         var y = (int)topLeft.Y;
+
+        // Clamp to the visible work area — a maximized WPF window extends past
+        // the screen edges, and our topmost window would cover the taskbar.
+        var wa = SystemParameters.WorkArea;
+        var waLeft = (int)(wa.Left * dpi);
+        var waTop = (int)(wa.Top * dpi);
+        var waRight = (int)((wa.Left + wa.Width) * dpi);
+        var waBottom = (int)((wa.Top + wa.Height) * dpi);
+        x = Math.Max(x, waLeft);
+        y = Math.Max(y, waTop);
+        panePixelW = Math.Min(x + panePixelW, waRight) - x;
+        panePixelH = Math.Min(y + panePixelH, waBottom) - y;
+        if (panePixelW < 10 || panePixelH < 10) return;
 
         // Skip no-op moves — needless repaints are what leave ghost trails behind.
         if (!force && panePixelW == _lastAppliedW && panePixelH == _lastAppliedH
