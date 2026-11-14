@@ -189,9 +189,9 @@ final class TSMuxer {
         int pos = 0;
         boolean first = true;
         while (pos < p) {
-            // A PCR adaptation field takes 14 bytes of header space
-            // (4 TS header + 1 AF length + 1 flags + 8 PCR) → payload ≤ 174.
-            int avail = (first && pcr) ? 174 : 184;
+            // A PCR adaptation field takes 12 bytes of header space
+            // (4 TS header + 1 AF length + 1 flags + 6 PCR) → payload ≤ 176.
+            int avail = (first && pcr) ? 176 : 184;
             int chunk = Math.min(avail, p - pos);
             emitPacket(pid, ccIdx, first, pes, pos, chunk, first && pcr, ptsUs);
             pos += chunk;
@@ -210,19 +210,19 @@ final class TSMuxer {
 
         int o = 4;
         if (withPcr) {
-            // 1 length byte + 1 flags byte + 8 bytes PCR = 9 bytes of AF.
+            // Correct PCR: exactly 6 bytes (33-bit base + 6 reserved + 9-bit ext).
+            // AF = 1 flags byte + 6 PCR bytes → declared length 7, payload at o == 12.
             pk[3] = (byte) (0x30 | (cc[ccIdx] & 0x0F));
-            pk[o++] = 9; // adaptation_field_length
+            pk[o++] = 7;   // adaptation_field_length
             pk[o++] = 0x10; // PCR flag
             long pcr = (pcrUs * 9 / 100) & 0x1FFFFFFFFL;
-            pk[o++] = (byte) (pcr >>> 25);
-            pk[o++] = (byte) (pcr >>> 17);
-            pk[o++] = (byte) (pcr >>> 9);
-            pk[o++] = (byte) (pcr >>> 1);
-            pk[o++] = (byte) (((pcr & 1) << 7));
-            pk[o++] = 0x00; // extension = 0
-            pk[o++] = 0x00;
-            // o == 14; caller guarantees chunk ≤ 174.
+            pk[o++] = (byte) (pcr >>> 25);          // base[32:25]
+            pk[o++] = (byte) (pcr >>> 17);          // base[24:17]
+            pk[o++] = (byte) (pcr >>> 9);           // base[16:9]
+            pk[o++] = (byte) (pcr >>> 1);           // base[8:1]
+            pk[o++] = (byte) ((pcr & 1) << 7);      // base[0] + reserved + ext[8:7]=0
+            pk[o++] = 0x00;                          // ext[6:0] << 1, ext flag 0
+            // o == 12; caller guarantees chunk ≤ 176.
         } else if (chunk < 184) {
             // Stuffing-only adaptation field: 1 length + 1 flags + (len-1) × 0xFF.
             pk[3] = (byte) (0x30 | (cc[ccIdx] & 0x0F));
