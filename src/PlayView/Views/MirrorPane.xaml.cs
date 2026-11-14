@@ -39,6 +39,7 @@ public partial class MirrorPane : UserControl
     private bool _streaming;
     private string? _streamUrl;
     private int _streamRestarts;
+    private bool _bufferLow = true;
     // VLC renders straight into this borderless window's HWND — no WPF
     // airspace tricks, no LibVLCSharp overlay windows.
     private Window? _streamWindow;
@@ -80,14 +81,23 @@ public partial class MirrorPane : UserControl
     }
 
     private static readonly object LogLock = new();
+    // VLC fires bursts of identical lines (buffering, control-query spam);
+    // writing every one floods the file and the disk — dedupe instead.
+    private static string _logLast = "";
+    private static DateTime _logLastTime = DateTime.MinValue;
 
     private static void AppendMirrorLog(string line)
     {
         try
         {
-            Directory.CreateDirectory(AppSettings.DataDir);
             lock (LogLock)
             {
+                if (line == _logLast && (DateTime.Now - _logLastTime).TotalMilliseconds < 1000)
+                    return;
+                _logLast = line;
+                _logLastTime = DateTime.Now;
+
+                Directory.CreateDirectory(AppSettings.DataDir);
                 File.AppendAllText(Path.Combine(AppSettings.DataDir, "mirror.log"),
                     $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {line}{Environment.NewLine}");
             }
@@ -315,7 +325,12 @@ public partial class MirrorPane : UserControl
         };
         player.Buffering += (_, e) =>
         {
-            if (e.Cache < 100) AppendMirrorLog("stream: buffering");
+            // Log state transitions only — VLC fires this dozens of times
+            // per second while the cache fluctuates.
+            var low = e.Cache < 100;
+            if (low == _bufferLow) return;
+            _bufferLow = low;
+            if (low) AppendMirrorLog("stream: buffering");
         };
         player.EndReached += (_, _) => Dispatcher.InvokeAsync(() => OnStreamEnded());
         player.EncounteredError += (_, _) => Dispatcher.InvokeAsync(() => OnStreamEnded());
@@ -324,7 +339,9 @@ public partial class MirrorPane : UserControl
 
     /// <summary>End of stream (phone closed, hiccup, decoder error): retry once
     /// or twice before giving up — the phone restarts its session per client,
-    /// so an immediate reconnect usually recovers.</summary>
+    /// so an immediate reconnect usually recovers.
+    /// NOTE: never call player.Stop() from inside an EndReached callback —
+    /// VLC deadlocks waiting for its own input thread (frozen UI).</summary>
     private void OnStreamEnded()
     {
         if (!_streaming) return;
@@ -335,7 +352,6 @@ public partial class MirrorPane : UserControl
             AppendMirrorLog($"stream: ended — auto-restart #{_streamRestarts}");
             try
             {
-                _streamPlayer?.Stop();
                 PlayStreamMedia();
                 return;
             }
@@ -418,7 +434,11 @@ public partial class MirrorPane : UserControl
         }
 
         _streaming = false;
-        try { _streamPlayer?.Stop(); } catch { /* already stopped */ }
+        // Stop can block on VLC's threads — do it off the UI thread so the
+        // pane never freezes while VLC winds down.
+        var player = _streamPlayer;
+        if (player != null)
+            Task.Run(() => { try { if (player.IsPlaying) player.Stop(); } catch { } });
 
         _streamWindow?.Hide();
 

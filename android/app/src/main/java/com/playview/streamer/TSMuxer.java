@@ -225,11 +225,15 @@ final class TSMuxer {
             // o == 12; caller guarantees chunk ≤ 176.
         } else if (chunk < 184) {
             // Stuffing-only adaptation field: 1 length + 1 flags + (len-1) × 0xFF.
+            // A chunk of exactly 183 gives len == 0 — then only the length byte
+            // exists (no flags!) and the payload starts right after it.
             pk[3] = (byte) (0x30 | (cc[ccIdx] & 0x0F));
             int len = 183 - chunk;
             pk[o++] = (byte) len;
-            pk[o++] = 0x00; // flags: nothing optional
-            for (int i = 0; i < len - 1; i++) pk[o++] = (byte) 0xFF;
+            if (len > 0) {
+                pk[o++] = 0x00; // flags: nothing optional
+                for (int i = 0; i < len - 1; i++) pk[o++] = (byte) 0xFF;
+            }
         } else {
             pk[3] = (byte) (0x10 | (cc[ccIdx] & 0x0F));
         }
