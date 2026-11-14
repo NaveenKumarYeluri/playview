@@ -65,8 +65,13 @@ public class MainActivity extends Activity {
         root.addView(stop);
 
         audioCheck = new android.widget.CheckBox(this);
-        audioCheck.setText("Stream audio (uncheck for video-only)");
-        audioCheck.setChecked(true);
+        if (Build.VERSION.SDK_INT >= 29) {
+            audioCheck.setText("Stream audio (internal device sound)");
+            audioCheck.setChecked(true);
+        } else {
+            audioCheck.setText("Capture audio via Microphone\n(Android 9: internal audio requires Android 10+.\nLeave unchecked and use Bluetooth Audio for crystal-clear sound)");
+            audioCheck.setChecked(false);
+        }
         audioCheck.setPadding(0, dp(8), 0, dp(4));
         root.addView(audioCheck);
 

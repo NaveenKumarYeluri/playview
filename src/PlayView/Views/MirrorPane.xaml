@@ -1,7 +1,8 @@
 <UserControl x:Class="PlayView.Views.MirrorPane"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:v="clr-namespace:PlayView.Views">
+             xmlns:v="clr-namespace:PlayView.Views"
+             xmlns:lvc="clr-namespace:LibVLCSharp.WPF;assembly=LibVLCSharp.WPF">
 
   <Grid Background="{StaticResource Brush.Pane}">
 
@@ -87,44 +88,23 @@
           <TextBox x:Name="PhoneIpBox" ToolTip="Phone IP address, e.g. 192.168.1.8"/>
         </DockPanel>
 
+        <Border Background="#202024" BorderBrush="{StaticResource Brush.Border}" BorderThickness="1"
+                CornerRadius="6" Padding="14,10" Margin="0,18,0,0">
+          <StackPanel>
+            <TextBlock Text="🎧 Audio Note (Android 9 / API 28):" FontWeight="SemiBold" Foreground="{StaticResource Brush.Text}" FontSize="12"/>
+            <TextBlock Text="Android 9 does not allow user apps to capture internal device audio. For crystal-clear sound with zero microphone noise, pair your phone to this laptop via Bluetooth Audio (Windows will act as a wireless speaker). You can stream video over USB or Wi-Fi simultaneously!"
+                       Foreground="{StaticResource Brush.SubText}" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="17"/>
+          </StackPanel>
+        </Border>
+
       </StackPanel>
     </ScrollViewer>
 
-    <!-- ── Embedded mirror view ───────────────────────────────────── -->
-    <DockPanel x:Name="MirrorPanel" Visibility="Collapsed" Background="{StaticResource Brush.Pane}">
-      <Border DockPanel.Dock="Top" Background="{StaticResource Brush.Chrome}"
-              BorderBrush="{StaticResource Brush.Border}" BorderThickness="0,0,0,1" Padding="8,5">
-        <DockPanel LastChildFill="True">
-          <Button Style="{StaticResource TransportButton}" Content="⏹" FontFamily="Segoe UI Symbol"
-                  Click="OnStopMirror" ToolTip="Stop mirror"/>
-          <Button Style="{StaticResource TransportButton}" Content="⏯" FontFamily="Segoe UI Symbol"
-                  Click="OnPlayPauseKey" ToolTip="Play / pause (Space)"/>
-          <Button Style="{StaticResource TransportButton}" Content="⏪" FontFamily="Segoe UI Symbol"
-                  Click="OnBack10Key" ToolTip="Back 10 s (←)"/>
-          <Button Style="{StaticResource TransportButton}" Content="⏩" FontFamily="Segoe UI Symbol"
-                  Click="OnFwd10Key" ToolTip="Forward 10 s (→)"/>
-          <Button Style="{StaticResource TransportButton}" Content="🔉" Click="OnVolDown" ToolTip="Volume down"/>
-          <Button Style="{StaticResource TransportButton}" Content="🔊" Click="OnVolUp" ToolTip="Volume up"/>
-          <Button Style="{StaticResource TransportButton}" Content="📋" FontFamily="Segoe UI Symbol"
-                  Click="OnTogglePlaylist" ToolTip="Files / Playlist (Ctrl+L)"/>
-          <Button Style="{StaticResource TransportButton}" Content="◎" FontFamily="Segoe UI Symbol"
-                  Click="OnTapCenter" ToolTip="Tap centre of phone screen (shows controls / toggles play in many apps)"/>
-          <Button Style="{StaticResource TransportButton}" Content="⬅" Click="OnBackKey" ToolTip="Back"/>
-          <Button Style="{StaticResource TransportButton}" Content="⌂" FontFamily="Segoe UI Symbol"
-                  Click="OnHomeKey" ToolTip="Home"/>
-          <Button DockPanel.Dock="Right" Style="{StaticResource TransportButton}" Content="⛶" FontFamily="Segoe UI Symbol"
-                  Click="OnToggleFullscreen" ToolTip="Fullscreen (F / Double-click)"/>
-          <Button DockPanel.Dock="Right" Style="{StaticResource TransportButton}" Content="Setup"
-                  Click="OnBackToSetup" ToolTip="Back to setup (mirror keeps running)"/>
-          <TextBlock x:Name="MirrorTitleText" VerticalAlignment="Center" Margin="10,0,6,0"
-                     Foreground="{StaticResource Brush.SubText}" FontSize="12"
-                     TextTrimming="CharacterEllipsis"/>
-        </DockPanel>
-      </Border>
-      <Grid x:Name="StreamGrid" Background="Black" MouseLeftButtonDown="OnStreamGridMouseDown">
-        <v:MirrorHost x:Name="MirrorHost"/>
-      </Grid>
-    </DockPanel>
+    <!-- ── Embedded mirror view (Clean VLC-style edge-to-edge canvas) ──── -->
+    <Grid x:Name="MirrorPanel" Visibility="Collapsed" Background="Black">
+      <lvc:VideoView x:Name="StreamVideo" Visibility="Collapsed" MouseLeftButtonDown="OnStreamGridMouseDown"/>
+      <v:MirrorHost x:Name="MirrorHost" Visibility="Collapsed"/>
+    </Grid>
 
   </Grid>
 

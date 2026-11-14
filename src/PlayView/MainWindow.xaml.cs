@@ -20,6 +20,9 @@ public partial class MainWindow : Window
     private string _activeId = "local";
     private bool _fullscreen;
     private WindowState _prevState = WindowState.Normal;
+    private WindowStyle _prevStyle = WindowStyle.SingleBorderWindow;
+    private ResizeMode _prevResize = ResizeMode.CanResize;
+    private DispatcherTimer? _fullscreenTimer;
     private bool _sliderDragging;
 
     public MainWindow(AppSettings settings)
@@ -109,6 +112,7 @@ public partial class MainWindow : Window
         }
 
         TransportBar.Visibility = (id == "local" || id == "mirror") ? Visibility.Visible : Visibility.Collapsed;
+        PhoneControls.Visibility = id == "mirror" ? Visibility.Visible : Visibility.Collapsed;
         _activeId = id;
     }
 
@@ -129,12 +133,16 @@ public partial class MainWindow : Window
         if (_activeId == "mirror")
         {
             PlayPauseBtn.Content = MirrorView.IsPlaying ? "⏸" : "▶";
-            TimeText.Text = MirrorView.IsStreaming ? "Phone Stream (Live)" : "Mirror (Ready)";
+            TimeText.Text = MirrorView.IsStreaming ? "LIVE" : "READY";
+            StatusLabel.Text = MirrorView.StreamStatusText;
             ProgressSlider.IsEnabled = false;
+            ProgressSlider.Value = 1;
+            ProgressSlider.Maximum = 1;
             return;
         }
 
         ProgressSlider.IsEnabled = true;
+        StatusLabel.Text = PlayerView.CurrentMediaTitle;
         var mp = PlayerView.Player;
         if (mp == null) return;
 
@@ -166,12 +174,35 @@ public partial class MainWindow : Window
             mp.Time = (long)ProgressSlider.Value;
     }
 
+    private int _savedVolume = 85;
+    private void OnToggleMute(object sender, RoutedEventArgs e)
+    {
+        if (VolumeSlider.Value > 0)
+        {
+            _savedVolume = (int)VolumeSlider.Value;
+            VolumeSlider.Value = 0;
+            MuteBtn.Content = "🔇";
+        }
+        else
+        {
+            VolumeSlider.Value = _savedVolume > 0 ? _savedVolume : 85;
+            MuteBtn.Content = "🔊";
+        }
+    }
+
+    private async void OnPhoneBack(object sender, RoutedEventArgs e) => await MirrorView.PhoneBackAsync();
+    private async void OnPhoneHome(object sender, RoutedEventArgs e) => await MirrorView.PhoneHomeAsync();
+    private async void OnPhoneTapCenter(object sender, RoutedEventArgs e) => await MirrorView.PhoneTapCenterAsync();
+    private void OnMirrorSetup(object sender, RoutedEventArgs e) => MirrorView.ReturnToSetup();
+
     private void OnVolumeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         if (PlayerView?.Player != null)
             PlayerView.Player.Volume = (int)VolumeSlider.Value;
         if (MirrorView != null)
             MirrorView.SetVolume((int)VolumeSlider.Value);
+        if (MuteBtn != null)
+            MuteBtn.Content = VolumeSlider.Value == 0 ? "🔇" : "🔊";
     }
 
     private void OnPlayPause(object sender, RoutedEventArgs e)
@@ -296,25 +327,82 @@ public partial class MainWindow : Window
         if (!_fullscreen)
         {
             _prevState = WindowState;
+            _prevStyle = WindowStyle;
+            _prevResize = ResizeMode;
             _fullscreen = true;
 
+            // 1. Hide TitleBar, MenuBar, Sidebar
+            TitleBarRow.Height = new GridLength(0);
+            TitleBarGrid.Visibility = Visibility.Collapsed;
+            MenuBarRow.Height = new GridLength(0);
             MenuBar.Visibility = Visibility.Collapsed;
             SidebarColumn.Width = new GridLength(0);
 
+            // 2. Remove WindowChrome to prevent caption reserved space / borders
+            System.Windows.Shell.WindowChrome.SetWindowChrome(this, null);
+
+            // 3. Edge-to-edge window style
+            ResizeMode = ResizeMode.NoResize;
             WindowStyle = WindowStyle.None;
+            WindowState = WindowState.Normal;
             WindowState = WindowState.Maximized;
+
+            StartFullscreenAutoHide();
         }
         else
         {
             _fullscreen = false;
+            StopFullscreenAutoHide();
 
-            WindowStyle = WindowStyle.SingleBorderWindow;
+            // 1. Restore WindowChrome
+            System.Windows.Shell.WindowChrome.SetWindowChrome(this, WindowChromeInst);
+
+            // 2. Restore window style and state
+            WindowStyle = _prevStyle;
+            ResizeMode = _prevResize;
             WindowState = _prevState;
 
+            // 3. Restore TitleBar, MenuBar, Sidebar
+            TitleBarRow.Height = new GridLength(34);
+            TitleBarGrid.Visibility = Visibility.Visible;
+            MenuBarRow.Height = GridLength.Auto;
             MenuBar.Visibility = Visibility.Visible;
             SidebarColumn.Width = _settings.ShowSidebar ? new GridLength(180) : new GridLength(0);
+            TransportBar.Visibility = (_activeId == "local" || _activeId == "mirror") ? Visibility.Visible : Visibility.Collapsed;
         }
+    }
+
+    private void StartFullscreenAutoHide()
+    {
+        _fullscreenTimer?.Stop();
+        _fullscreenTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2.5) };
+        _fullscreenTimer.Tick += (_, _) =>
+        {
+            if (_fullscreen && !TransportBar.IsMouseOver)
+            {
+                TransportBar.Visibility = Visibility.Collapsed;
+            }
+        };
+        _fullscreenTimer.Start();
+    }
+
+    private void StopFullscreenAutoHide()
+    {
+        _fullscreenTimer?.Stop();
+        _fullscreenTimer = null;
         TransportBar.Visibility = (_activeId == "local" || _activeId == "mirror") ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    protected override void OnPreviewMouseMove(MouseEventArgs e)
+    {
+        base.OnPreviewMouseMove(e);
+        if (_fullscreen && (_activeId == "local" || _activeId == "mirror"))
+        {
+            if (TransportBar.Visibility != Visibility.Visible)
+                TransportBar.Visibility = Visibility.Visible;
+            _fullscreenTimer?.Stop();
+            _fullscreenTimer?.Start();
+        }
     }
 
     // ── Keyboard shortcuts (VLC-style) ──────────────────────────────────────
@@ -324,6 +412,13 @@ public partial class MainWindow : Window
         if (_fullscreen && e.Key == Key.Escape)
         {
             ToggleFullscreen();
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.M)
+        {
+            OnToggleMute(this, new RoutedEventArgs());
             e.Handled = true;
             return;
         }

@@ -10,20 +10,20 @@
         AllowDrop="True" Drop="OnDrop">
 
   <shell:WindowChrome.WindowChrome>
-    <shell:WindowChrome CaptionHeight="34" ResizeBorderThickness="6"
+    <shell:WindowChrome x:Name="WindowChromeInst" CaptionHeight="34" ResizeBorderThickness="6"
                         GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False"/>
   </shell:WindowChrome.WindowChrome>
 
   <Grid>
     <Grid.RowDefinitions>
-      <RowDefinition Height="34"/>
-      <RowDefinition Height="Auto"/>
+      <RowDefinition x:Name="TitleBarRow" Height="34"/>
+      <RowDefinition x:Name="MenuBarRow" Height="Auto"/>
       <RowDefinition Height="*"/>
-      <RowDefinition Height="Auto"/>
+      <RowDefinition x:Name="TransportBarRow" Height="Auto"/>
     </Grid.RowDefinitions>
 
     <!-- Custom dark title bar -->
-    <Grid Background="{StaticResource Brush.Chrome}">
+    <Grid x:Name="TitleBarGrid" Background="{StaticResource Brush.Chrome}">
       <TextBlock Text="PlayView" Margin="12,0,0,0" VerticalAlignment="Center"
                  Foreground="{StaticResource Brush.SubText}" FontSize="12"/>
       <StackPanel HorizontalAlignment="Right" Orientation="Horizontal"
@@ -79,49 +79,80 @@
       </Grid>
     </Grid>
 
-    <!-- Transport bar -->
+    <!-- Transport bar (VLC-style) -->
     <Border x:Name="TransportBar" Grid.Row="3" Background="{StaticResource Brush.Chrome}"
-            BorderBrush="{StaticResource Brush.Border}" BorderThickness="0,1,0,0" Padding="10,6">
+            BorderBrush="{StaticResource Brush.Border}" BorderThickness="0,1,0,0" Padding="12,5,12,7">
       <Grid>
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="10"/>
-          <ColumnDefinition Width="*"/>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="Auto"/>
-          <ColumnDefinition Width="Auto"/>
-        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
 
-        <Button x:Name="PlayPauseBtn" Grid.Column="0" Style="{StaticResource TransportButton}"
-                Content="▶" FontFamily="Segoe UI Symbol" Click="OnPlayPause" ToolTip="Play / pause (Space)"/>
-        <Button x:Name="StopBtn" Grid.Column="1" Style="{StaticResource TransportButton}"
-                Content="⏹" FontFamily="Segoe UI Symbol" Click="OnStop" ToolTip="Stop"/>
-        <Button Grid.Column="2" Style="{StaticResource TransportButton}"
-                Content="⏪" FontFamily="Segoe UI Symbol" Click="OnBack10" ToolTip="Back 10 s (←)"/>
-        <Button Grid.Column="3" Style="{StaticResource TransportButton}"
-                Content="⏩" FontFamily="Segoe UI Symbol" Click="OnFwd10" ToolTip="Forward 10 s (→)"/>
+        <!-- Row 0: Progress / Seek slider and Time / Status -->
+        <Grid Grid.Row="0" Margin="0,0,0,3">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
 
-        <Slider x:Name="ProgressSlider" Grid.Column="5" Minimum="0" Maximum="1"
-                VerticalAlignment="Center"
-                PreviewMouseLeftButtonDown="OnProgressDown"
-                PreviewMouseLeftButtonUp="OnProgressUp"/>
+          <Slider x:Name="ProgressSlider" Grid.Column="0" Minimum="0" Maximum="1"
+                  VerticalAlignment="Center" Margin="0,0,10,0"
+                  PreviewMouseLeftButtonDown="OnProgressDown"
+                  PreviewMouseLeftButtonUp="OnProgressUp"/>
 
-        <TextBlock x:Name="TimeText" Grid.Column="6" Text="00:00 / 00:00" Margin="8,0,10,0"
-                   VerticalAlignment="Center" Foreground="{StaticResource Brush.SubText}" FontSize="12"/>
+          <TextBlock x:Name="TimeText" Grid.Column="1" Text="00:00 / 00:00"
+                     VerticalAlignment="Center" Foreground="{StaticResource Brush.SubText}" FontSize="12" FontFamily="Consolas, Segoe UI"/>
+        </Grid>
 
-        <TextBlock Grid.Column="7" Text="🔊" VerticalAlignment="Center" FontSize="13" Margin="0,0,6,0"/>
-        <Slider x:Name="VolumeSlider" Grid.Column="8" Width="90" Minimum="0" Maximum="125"
-                Value="85" VerticalAlignment="Center" ValueChanged="OnVolumeChanged"/>
+        <!-- Row 1: Transport & Control Buttons -->
+        <Grid Grid.Row="1">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
 
-        <Button Grid.Column="9" Style="{StaticResource TransportButton}" Margin="6,0,0,0"
-                Content="📋" FontFamily="Segoe UI Symbol" Click="OnTogglePlaylist" ToolTip="Files / Playlist (Ctrl+L)"/>
-        <Button Grid.Column="10" Style="{StaticResource TransportButton}" Margin="6,0,0,0"
-                Content="⛶" FontFamily="Segoe UI Symbol" Click="OnToggleFullscreen" ToolTip="Fullscreen (F)"/>
+          <!-- Left: Play/Pause, Stop, Prev/Next, and Phone Remote buttons -->
+          <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+            <Button x:Name="PlayPauseBtn" Style="{StaticResource TransportButton}"
+                    Content="▶" FontFamily="Segoe UI Symbol" Click="OnPlayPause" ToolTip="Play / Pause (Space)"/>
+            <Button x:Name="StopBtn" Style="{StaticResource TransportButton}" Margin="4,0,0,0"
+                    Content="⏹" FontFamily="Segoe UI Symbol" Click="OnStop" ToolTip="Stop"/>
+            <Button Style="{StaticResource TransportButton}" Margin="4,0,0,0"
+                    Content="⏪" FontFamily="Segoe UI Symbol" Click="OnBack10" ToolTip="Back 10 s (←)"/>
+            <Button Style="{StaticResource TransportButton}" Margin="4,0,0,0"
+                    Content="⏩" FontFamily="Segoe UI Symbol" Click="OnFwd10" ToolTip="Forward 10 s (→)"/>
+
+            <!-- Phone Remote Buttons (only shown in Mirror mode) -->
+            <StackPanel x:Name="PhoneControls" Orientation="Horizontal" Visibility="Collapsed" Margin="8,0,0,0">
+              <Rectangle Width="1" Height="16" Fill="{StaticResource Brush.Border}" Margin="0,0,8,0" VerticalAlignment="Center"/>
+              <Button Style="{StaticResource TransportButton}" Margin="2,0,0,0"
+                      Content="⬅" Click="OnPhoneBack" ToolTip="Phone Back"/>
+              <Button Style="{StaticResource TransportButton}" Margin="2,0,0,0"
+                      Content="⌂" FontFamily="Segoe UI Symbol" Click="OnPhoneHome" ToolTip="Phone Home"/>
+              <Button Style="{StaticResource TransportButton}" Margin="2,0,0,0"
+                      Content="◎" FontFamily="Segoe UI Symbol" Click="OnPhoneTapCenter" ToolTip="Tap Center of Phone Screen"/>
+              <Button Style="{StaticResource TransportButton}" Margin="2,0,0,0"
+                      Content="⚙" FontFamily="Segoe UI Symbol" Click="OnMirrorSetup" ToolTip="Mirror Setup &amp; Devices"/>
+            </StackPanel>
+          </StackPanel>
+
+          <!-- Middle: Status / Title -->
+          <TextBlock x:Name="StatusLabel" Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center"
+                     Foreground="{StaticResource Brush.SubText}" FontSize="12" TextTrimming="CharacterEllipsis"/>
+
+          <!-- Right: Volume, Playlist, Fullscreen -->
+          <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+            <Button x:Name="MuteBtn" Style="{StaticResource TransportButton}" Margin="0,0,4,0"
+                    Content="🔊" FontSize="13" Click="OnToggleMute" ToolTip="Mute / Unmute (M)"/>
+            <Slider x:Name="VolumeSlider" Width="95" Minimum="0" Maximum="125"
+                    Value="85" VerticalAlignment="Center" ValueChanged="OnVolumeChanged" ToolTip="Volume (85%)"/>
+            <Button Style="{StaticResource TransportButton}" Margin="8,0,0,0"
+                    Content="📋" FontFamily="Segoe UI Symbol" Click="OnTogglePlaylist" ToolTip="Files / Playlist (Ctrl+L)"/>
+            <Button Style="{StaticResource TransportButton}" Margin="4,0,0,0"
+                    Content="⛶" FontFamily="Segoe UI Symbol" Click="OnToggleFullscreen" ToolTip="Fullscreen (F / Double-click)"/>
+          </StackPanel>
+        </Grid>
       </Grid>
     </Border>
   </Grid>

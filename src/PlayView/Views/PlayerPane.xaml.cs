@@ -133,6 +133,9 @@ public partial class PlayerPane : UserControl
     public static bool IsMediaFile(string path) =>
         MediaExtensions.Contains(Path.GetExtension(path));
 
+    public string CurrentMediaTitle =>
+        (_index >= 0 && _index < _playlist.Count) ? Path.GetFileName(_playlist[_index]) : "";
+
     public void Shutdown()
     {
         Player.Dispose();
