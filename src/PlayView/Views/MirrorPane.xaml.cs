@@ -37,6 +37,8 @@ public partial class MirrorPane : UserControl
     private LibVLC? _streamLibVlc;
     private MediaPlayer? _streamPlayer;
     private bool _streaming;
+    private string? _streamUrl;
+    private int _streamRestarts;
     // VLC renders straight into this borderless window's HWND — no WPF
     // airspace tricks, no LibVLCSharp overlay windows.
     private Window? _streamWindow;
@@ -240,6 +242,15 @@ public partial class MirrorPane : UserControl
 
             // Set before showing the window — the position/focus glue keys off it.
             _streaming = true;
+
+            // VLC sizes its video to the window's size when the output is
+            // created — a pane that is still laying out would give a tiny
+            // picture forever. Wait for a real size first.
+            for (var i = 0; i < 100 && MirrorHost.ActualWidth < 10; i++)
+                await Task.Delay(20);
+            if (MirrorHost.ActualWidth < 10)
+                throw new InvalidOperationException("the mirror pane never got its layout");
+
             ShowStreamWindow();
 
             for (var i = 0; i < 50 && _streamHwnd == IntPtr.Zero; i++)
@@ -250,9 +261,8 @@ public partial class MirrorPane : UserControl
             PositionFloatingMirror(force: true);
             _streamPlayer.Hwnd = _streamHwnd;
 
-            using var media = new Media(_streamLibVlc, new Uri(url));
-            media.AddOption(":network-caching=300");
-            _streamPlayer.Play(media);
+            _streamUrl = url;
+            PlayStreamMedia();
 
             StatusMessage = "Streaming from the phone through VLC's engine.";
 
@@ -298,25 +308,54 @@ public partial class MirrorPane : UserControl
     private MediaPlayer CreateStreamPlayer()
     {
         var player = new MediaPlayer(_streamLibVlc!) { Volume = 85 };
-        player.Playing += (_, _) => AppendMirrorLog("stream: VLC is playing");
+        player.Playing += (_, _) =>
+        {
+            AppendMirrorLog("stream: VLC is playing");
+            _streamRestarts = 0; // a stable connection resets the retry budget
+        };
         player.Buffering += (_, e) =>
         {
             if (e.Cache < 100) AppendMirrorLog("stream: buffering");
         };
-        player.EndReached += (_, _) => Dispatcher.InvokeAsync(() =>
-        {
-            _streaming = false;
-            ShowStreamNotice("Stream ended — the phone stopped streaming or disconnected. " +
-                             "Start streaming on the phone again, then click Start (USB/Wi-Fi).");
-        });
-        player.EncounteredError += (_, _) => Dispatcher.InvokeAsync(() =>
-        {
-            _streaming = false;
-            ShowStreamNotice("Stream error — VLC could not play the phone's stream. " +
-                             "Check the phone app is 'Streaming', then click Start (USB/Wi-Fi) to retry. " +
-                             "(Details: mirror.log)");
-        });
+        player.EndReached += (_, _) => Dispatcher.InvokeAsync(() => OnStreamEnded());
+        player.EncounteredError += (_, _) => Dispatcher.InvokeAsync(() => OnStreamEnded());
         return player;
+    }
+
+    /// <summary>End of stream (phone closed, hiccup, decoder error): retry once
+    /// or twice before giving up — the phone restarts its session per client,
+    /// so an immediate reconnect usually recovers.</summary>
+    private void OnStreamEnded()
+    {
+        if (!_streaming) return;
+
+        if (_streamRestarts < 2)
+        {
+            _streamRestarts++;
+            AppendMirrorLog($"stream: ended — auto-restart #{_streamRestarts}");
+            try
+            {
+                _streamPlayer?.Stop();
+                PlayStreamMedia();
+                return;
+            }
+            catch (Exception ex)
+            {
+                AppendMirrorLog("stream: restart failed — " + ex.Message);
+            }
+        }
+
+        ShowStreamNotice("Stream ended — the phone stopped streaming or disconnected. " +
+                         "Start streaming on the phone again, then click Start (USB/Wi-Fi).");
+    }
+
+    private void PlayStreamMedia()
+    {
+        using var media = new Media(_streamLibVlc!, new Uri(_streamUrl!));
+        // A live stream whose data trickles in (static screen) needs a real
+        // buffer — VLC's default is far too tight for it.
+        media.AddOption(":network-caching=1500");
+        _streamPlayer!.Play(media);
     }
 
     /// <summary>Reports a stream problem without yanking the user back to setup —
