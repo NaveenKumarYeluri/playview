@@ -9,6 +9,7 @@
     <application
         android:label="PlayView Stream"
         android:icon="@mipmap/ic_launcher"
+        android:debuggable="true"
         android:theme="@android:style/Theme.DeviceDefault">
 
         <activity android:name=".MainActivity" android:exported="true">

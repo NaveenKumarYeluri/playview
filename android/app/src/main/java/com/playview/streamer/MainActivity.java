@@ -26,6 +26,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        CrashCatcher.install(this);
 
         int pad = dp(24);
         LinearLayout root = new LinearLayout(this);
@@ -65,7 +66,9 @@ public class MainActivity extends Activity {
         status = new TextView(this);
         status.setTextSize(13);
         status.setPadding(0, dp(14), 0, 0);
-        root.addView(status);
+        android.widget.ScrollView scroller = new android.widget.ScrollView(this);
+        scroller.addView(status);
+        root.addView(scroller);
 
         setContentView(root);
     }
@@ -122,6 +125,9 @@ public class MainActivity extends Activity {
                 : "Not streaming.";
         status.setText(state + "\n\nThis phone's IP (for Wi-Fi): " + localIp()
                 + "\nPort: " + StreamService.PORT);
+
+        String crash = CrashCatcher.lastCrash(this);
+        if (crash != null) status.setText(status.getText() + "\n\n── LAST CRASH ──\n" + crash);
     }
 
     private String localIp() {
