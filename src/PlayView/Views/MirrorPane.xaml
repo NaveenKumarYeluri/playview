@@ -98,14 +98,22 @@
           <Button Style="{StaticResource TransportButton}" Content="⏹" FontFamily="Segoe UI Symbol"
                   Click="OnStopMirror" ToolTip="Stop mirror"/>
           <Button Style="{StaticResource TransportButton}" Content="⏯" FontFamily="Segoe UI Symbol"
-                  Click="OnPlayPauseKey" ToolTip="Play / pause on phone"/>
+                  Click="OnPlayPauseKey" ToolTip="Play / pause (Space)"/>
+          <Button Style="{StaticResource TransportButton}" Content="⏪" FontFamily="Segoe UI Symbol"
+                  Click="OnBack10Key" ToolTip="Back 10 s (←)"/>
+          <Button Style="{StaticResource TransportButton}" Content="⏩" FontFamily="Segoe UI Symbol"
+                  Click="OnFwd10Key" ToolTip="Forward 10 s (→)"/>
           <Button Style="{StaticResource TransportButton}" Content="🔉" Click="OnVolDown" ToolTip="Volume down"/>
           <Button Style="{StaticResource TransportButton}" Content="🔊" Click="OnVolUp" ToolTip="Volume up"/>
+          <Button Style="{StaticResource TransportButton}" Content="📋" FontFamily="Segoe UI Symbol"
+                  Click="OnTogglePlaylist" ToolTip="Files / Playlist (Ctrl+L)"/>
           <Button Style="{StaticResource TransportButton}" Content="◎" FontFamily="Segoe UI Symbol"
                   Click="OnTapCenter" ToolTip="Tap centre of phone screen (shows controls / toggles play in many apps)"/>
           <Button Style="{StaticResource TransportButton}" Content="⬅" Click="OnBackKey" ToolTip="Back"/>
           <Button Style="{StaticResource TransportButton}" Content="⌂" FontFamily="Segoe UI Symbol"
                   Click="OnHomeKey" ToolTip="Home"/>
+          <Button DockPanel.Dock="Right" Style="{StaticResource TransportButton}" Content="⛶" FontFamily="Segoe UI Symbol"
+                  Click="OnToggleFullscreen" ToolTip="Fullscreen (F / Double-click)"/>
           <Button DockPanel.Dock="Right" Style="{StaticResource TransportButton}" Content="Setup"
                   Click="OnBackToSetup" ToolTip="Back to setup (mirror keeps running)"/>
           <TextBlock x:Name="MirrorTitleText" VerticalAlignment="Center" Margin="10,0,6,0"
@@ -113,7 +121,7 @@
                      TextTrimming="CharacterEllipsis"/>
         </DockPanel>
       </Border>
-      <Grid x:Name="StreamGrid">
+      <Grid x:Name="StreamGrid" Background="Black" MouseLeftButtonDown="OnStreamGridMouseDown">
         <v:MirrorHost x:Name="MirrorHost"/>
       </Grid>
     </DockPanel>

@@ -108,7 +108,7 @@ public partial class MainWindow : Window
             }
         }
 
-        TransportBar.Visibility = id == "local" ? Visibility.Visible : Visibility.Collapsed;
+        TransportBar.Visibility = (id == "local" || id == "mirror") ? Visibility.Visible : Visibility.Collapsed;
         _activeId = id;
     }
 
@@ -126,6 +126,15 @@ public partial class MainWindow : Window
 
     private void UpdateTransport()
     {
+        if (_activeId == "mirror")
+        {
+            PlayPauseBtn.Content = MirrorView.IsPlaying ? "⏸" : "▶";
+            TimeText.Text = MirrorView.IsStreaming ? "Phone Stream (Live)" : "Mirror (Ready)";
+            ProgressSlider.IsEnabled = false;
+            return;
+        }
+
+        ProgressSlider.IsEnabled = true;
         var mp = PlayerView.Player;
         if (mp == null) return;
 
@@ -159,14 +168,35 @@ public partial class MainWindow : Window
 
     private void OnVolumeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (PlayerView != null && PlayerView.Player != null)
+        if (PlayerView?.Player != null)
             PlayerView.Player.Volume = (int)VolumeSlider.Value;
+        if (MirrorView != null)
+            MirrorView.SetVolume((int)VolumeSlider.Value);
     }
 
-    private void OnPlayPause(object sender, RoutedEventArgs e) => PlayerView.TogglePlayPause();
-    private void OnStop(object sender, RoutedEventArgs e) => PlayerView.Stop();
-    private void OnBack10(object sender, RoutedEventArgs e) => PlayerView.SeekRelative(-10_000);
-    private void OnFwd10(object sender, RoutedEventArgs e) => PlayerView.SeekRelative(10_000);
+    private void OnPlayPause(object sender, RoutedEventArgs e)
+    {
+        if (_activeId == "mirror") MirrorView.TogglePlayPause();
+        else PlayerView.TogglePlayPause();
+    }
+
+    private void OnStop(object sender, RoutedEventArgs e)
+    {
+        if (_activeId == "mirror") MirrorView.Stop();
+        else PlayerView.Stop();
+    }
+
+    private void OnBack10(object sender, RoutedEventArgs e)
+    {
+        if (_activeId == "mirror") MirrorView.SeekRelative(-10_000);
+        else PlayerView.SeekRelative(-10_000);
+    }
+
+    private void OnFwd10(object sender, RoutedEventArgs e)
+    {
+        if (_activeId == "mirror") MirrorView.SeekRelative(10_000);
+        else PlayerView.SeekRelative(10_000);
+    }
 
     // ── Media open / drop ───────────────────────────────────────────────────
 
@@ -211,7 +241,12 @@ public partial class MainWindow : Window
 
     // ── Menu commands ───────────────────────────────────────────────────────
 
-    private void OnTogglePlaylist(object sender, RoutedEventArgs e) => PlayerView.TogglePlaylist();
+    public void OnTogglePlaylist(object? sender = null, RoutedEventArgs? e = null)
+    {
+        if (_activeId != "local")
+            SelectPane("local");
+        PlayerView.TogglePlaylist();
+    }
 
     private void OnToggleSidebar(object sender, RoutedEventArgs e)
     {
@@ -256,7 +291,7 @@ public partial class MainWindow : Window
 
     private void OnToggleFullscreen(object sender, RoutedEventArgs e) => ToggleFullscreen();
 
-    private void ToggleFullscreen()
+    public void ToggleFullscreen()
     {
         if (!_fullscreen)
         {
@@ -264,7 +299,6 @@ public partial class MainWindow : Window
             _fullscreen = true;
 
             MenuBar.Visibility = Visibility.Collapsed;
-            TransportBar.Visibility = Visibility.Collapsed;
             SidebarColumn.Width = new GridLength(0);
 
             WindowStyle = WindowStyle.None;
@@ -278,9 +312,9 @@ public partial class MainWindow : Window
             WindowState = _prevState;
 
             MenuBar.Visibility = Visibility.Visible;
-            TransportBar.Visibility = _activeId == "local" ? Visibility.Visible : Visibility.Collapsed;
             SidebarColumn.Width = _settings.ShowSidebar ? new GridLength(180) : new GridLength(0);
         }
+        TransportBar.Visibility = (_activeId == "local" || _activeId == "mirror") ? Visibility.Visible : Visibility.Collapsed;
     }
 
     // ── Keyboard shortcuts (VLC-style) ──────────────────────────────────────
@@ -308,26 +342,42 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_activeId != "local") return;
-
-        switch (e.Key)
+        if (e.Key == Key.F)
         {
-            case Key.Space:
-                PlayerView.TogglePlayPause();
-                e.Handled = true;
-                break;
-            case Key.F:
-                ToggleFullscreen();
-                e.Handled = true;
-                break;
-            case Key.Left:
-                PlayerView.SeekRelative(-10_000);
-                e.Handled = true;
-                break;
-            case Key.Right:
-                PlayerView.SeekRelative(10_000);
-                e.Handled = true;
-                break;
+            ToggleFullscreen();
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.Space)
+        {
+            if (_activeId == "mirror") MirrorView.TogglePlayPause();
+            else if (_activeId == "local") PlayerView.TogglePlayPause();
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.Left)
+        {
+            if (_activeId == "mirror") MirrorView.SeekRelative(-10_000);
+            else if (_activeId == "local") PlayerView.SeekRelative(-10_000);
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.Right)
+        {
+            if (_activeId == "mirror") MirrorView.SeekRelative(10_000);
+            else if (_activeId == "local") PlayerView.SeekRelative(10_000);
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.L && e.KeyboardDevice.Modifiers == ModifierKeys.Control)
+        {
+            OnTogglePlaylist();
+            e.Handled = true;
+            return;
         }
     }
 

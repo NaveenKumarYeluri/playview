@@ -84,6 +84,7 @@ public class StreamService extends Service {
 
     private MediaProjection projection;
     private volatile boolean running;
+    private volatile boolean enableAudio = true;
     private Thread serverThread;
     private volatile Socket currentClient;
     private static volatile boolean active;
@@ -122,6 +123,7 @@ public class StreamService extends Service {
 
         int resultCode = intent.getIntExtra("resultCode", -1);
         Intent data = intent.getParcelableExtra("data");
+        enableAudio = intent.getBooleanExtra("enableAudio", true);
         if (data == null) {
             log("start without projection data");
             stopSelf();
@@ -310,7 +312,7 @@ public class StreamService extends Service {
         }, "pv-keepalive");
 
         VideoPipeline video = new VideoPipeline(mux, w, h, m.densityDpi);
-        AudioPipeline audio = new AudioPipeline(mux);
+        AudioPipeline audio = enableAudio ? new AudioPipeline(mux) : null;
 
         try {
             video.start();
@@ -505,14 +507,28 @@ public class StreamService extends Service {
                 }
 
                 if (record == null || record.getState() != AudioRecord.STATE_INITIALIZED) {
-                    log("initializing AudioRecord with AudioSource.MIC");
-                    record = new AudioRecord(
-                            android.media.MediaRecorder.AudioSource.MIC,
-                            44100,
-                            AudioFormat.CHANNEL_IN_STEREO,
-                            AudioFormat.ENCODING_PCM_16BIT,
-                            bufSize);
-                    log("audio record created with MIC, state=" + record.getState());
+                    log("initializing AudioRecord with AudioSource.VOICE_COMMUNICATION (hardware echo & noise cancellation)");
+                    try {
+                        record = new AudioRecord(
+                                android.media.MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                                44100,
+                                AudioFormat.CHANNEL_IN_STEREO,
+                                AudioFormat.ENCODING_PCM_16BIT,
+                                bufSize);
+                    } catch (Throwable t) {
+                        logW("VOICE_COMMUNICATION not supported, falling back to MIC", t);
+                        record = null;
+                    }
+
+                    if (record == null || record.getState() != AudioRecord.STATE_INITIALIZED) {
+                        record = new AudioRecord(
+                                android.media.MediaRecorder.AudioSource.MIC,
+                                44100,
+                                AudioFormat.CHANNEL_IN_STEREO,
+                                AudioFormat.ENCODING_PCM_16BIT,
+                                bufSize);
+                    }
+                    log("audio record created with microphone source, state=" + record.getState());
                 }
 
                 if (record.getState() != AudioRecord.STATE_INITIALIZED) {
@@ -520,6 +536,30 @@ public class StreamService extends Service {
                     stop();
                     return;
                 }
+
+                // Enable hardware Noise Suppressor and Acoustic Echo Canceler on this session
+                try {
+                    int sid = record.getAudioSessionId();
+                    if (android.media.audiofx.NoiseSuppressor.isAvailable()) {
+                        android.media.audiofx.NoiseSuppressor ns =
+                                android.media.audiofx.NoiseSuppressor.create(sid);
+                        if (ns != null) {
+                            ns.setEnabled(true);
+                            log("hardware NoiseSuppressor enabled");
+                        }
+                    }
+                    if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                        android.media.audiofx.AcousticEchoCanceler aec =
+                                android.media.audiofx.AcousticEchoCanceler.create(sid);
+                        if (aec != null) {
+                            aec.setEnabled(true);
+                            log("hardware AcousticEchoCanceler enabled");
+                        }
+                    }
+                } catch (Throwable t) {
+                    logW("could not enable audiofx: " + t.getMessage(), null);
+                }
+
                 record.startRecording();
                 log("audio recording state=" + record.getRecordingState());
                 if (record.getRecordingState() != AudioRecord.RECORDSTATE_RECORDING) {
@@ -573,6 +613,20 @@ public class StreamService extends Service {
                         continue;
                     }
                     emptyReads = 0;
+
+                    // Digital noise gate: if ambient noise level is low (room hiss / fan / breathing),
+                    // silence the buffer so disturbances are cut out during silent or quiet scenes.
+                    short[] samples = new short[n / 2];
+                    buf.position(0);
+                    buf.asShortBuffer().get(samples);
+                    long sumSquares = 0;
+                    for (short s : samples) sumSquares += ((long) s * s);
+                    double rms = Math.sqrt((double) sumSquares / samples.length);
+                    if (rms < 350.0) {
+                        buf.position(0);
+                        byte[] silence = new byte[n];
+                        buf.put(silence);
+                    }
 
                     int idx = encoder.dequeueInputBuffer(50_000);
                     if (idx < 0) continue;

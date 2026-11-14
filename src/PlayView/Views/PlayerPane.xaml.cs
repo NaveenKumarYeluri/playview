@@ -104,6 +104,15 @@ public partial class PlayerPane : UserControl
             : Visibility.Visible;
     }
 
+    private void OnVideoMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ClickCount == 2)
+        {
+            (Window.GetWindow(this) as MainWindow)?.ToggleFullscreen();
+            e.Handled = true;
+        }
+    }
+
     private void HideHint() => HintBorder.Visibility = Visibility.Collapsed;
     private void ShowHint() => HintBorder.Visibility = Visibility.Visible;
 

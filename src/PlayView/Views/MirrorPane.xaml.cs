@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Threading;
 using LibVLCSharp.Shared;
@@ -290,6 +291,13 @@ public partial class MirrorPane : UserControl
             // Set before showing the window — the position/focus glue keys off it.
             _streaming = true;
 
+            // Commit layout updates for the new visible elements before passing HWND to VLC
+            UpdateLayout();
+            MirrorPanel.UpdateLayout();
+            StreamGrid.UpdateLayout();
+            MirrorHost.UpdateLayout();
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.Render);
+
             for (var i = 0; i < 100 && MirrorHost.ActualWidth < 10; i++)
                 await Task.Delay(20);
             if (MirrorHost.ActualWidth < 10)
@@ -304,11 +312,6 @@ public partial class MirrorPane : UserControl
                 throw new InvalidOperationException("video surface never appeared");
             _streamHwnd = MirrorHost.ChildHwnd;
 
-            // VLC sizes its video to the window's size when the output is
-            // created — an empty surface would give a tiny picture forever.
-            // Explicitly resize the native child window to match the WPF pane's
-            // actual layout size BEFORE handing it to VLC, so the very first
-            // vout opens at full resolution (eliminates the tiny-video-on-first-start race).
             var dpi = 1.0;
             var source = PresentationSource.FromVisual(this);
             if (source?.CompositionTarget != null)
@@ -316,6 +319,9 @@ public partial class MirrorPane : UserControl
             var hostW = Math.Max(1, (int)Math.Round(MirrorHost.ActualWidth * dpi));
             var hostH = Math.Max(1, (int)Math.Round(MirrorHost.ActualHeight * dpi));
             Native.MoveWindow(_streamHwnd, 0, 0, hostW, hostH, true);
+            Native.ShowWindow(_streamHwnd, Native.SW_SHOWNA);
+
+            await Task.Delay(80);
 
             if (Native.GetClientRect(_streamHwnd, out var surface) &&
                 (surface.Right - surface.Left < 10 || surface.Bottom - surface.Top < 10))
@@ -503,6 +509,23 @@ public partial class MirrorPane : UserControl
         }
     };
         _streamAliveTimer.Start();
+
+        // Also check vout size rapidly during the first 3 seconds to immediately auto-heal any tiny render
+        var quickVoutTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        int quickTicks = 0;
+        quickVoutTimer.Tick += (_, _) =>
+        {
+            if (!_streaming || _healRestartUsed || ++quickTicks > 12)
+            {
+                quickVoutTimer.Stop();
+                return;
+            }
+            if (_streamPlayer?.VoutCount > 0)
+            {
+                CheckVoutSize();
+            }
+        };
+        quickVoutTimer.Start();
     }
 
     /// <summary>First-play tiny race: VLC 3.0 builds its own window tree
@@ -519,7 +542,7 @@ public partial class MirrorPane : UserControl
         if (!Native.GetClientRect(_streamHwnd, out var paneRect)) return;
         var paneW = paneRect.Right - paneRect.Left;
         var paneH = paneRect.Bottom - paneRect.Top;
-        if (paneW < 10 || paneH < 10) return;
+        if (paneW < 50 || paneH < 50) return;
 
         // Find VLC's render sub-window (a descendant of our surface).
         IntPtr vout = IntPtr.Zero;
@@ -540,17 +563,11 @@ public partial class MirrorPane : UserControl
         var voutW = voutRect.Right - voutRect.Left;
         var voutH = voutRect.Bottom - voutRect.Top;
 
-        // The sub-window holds the aspect-fitted video place, not the pane rect.
-        uint vw = 0, vh = 0;
-        try { _streamPlayer!.Size(0, ref vw, ref vh); } catch { }
-        if (vw == 0 || vh == 0) return;
+        // If the vout sub-window was created tiny (< 55% of pane dimensions or < 220px)
+        // while the pane is large (> 400px), it is stuck in the first-play race!
+        bool isTiny = (paneW > 400 && (voutW < paneW * 0.55 && voutH < paneH * 0.55)) || voutW < 180 || voutH < 180;
 
-        var scale = Math.Min((double)paneW / vw, (double)paneH / vh);
-        var expW = (int)Math.Round(vw * scale);
-        var expH = (int)Math.Round(vh * scale);
-        var tol = Math.Max(16, Math.Max(expW, expH) / 32);
-
-        if (Math.Abs(voutW - expW) <= tol && Math.Abs(voutH - expH) <= tol)
+        if (!isTiny)
         {
             if (_voutMismatchStreak > 0)
                 AppendMirrorLog($"stream: vout sub-window OK ({voutW}x{voutH})");
@@ -559,19 +576,19 @@ public partial class MirrorPane : UserControl
         }
 
         _voutMismatchStreak++;
-        AppendMirrorLog($"stream: vout sub-window {voutW}x{voutH}, expected ~{expW}x{expH} " +
-                        $"(mismatch #{_voutMismatchStreak})");
+        AppendMirrorLog($"stream: vout sub-window {voutW}x{voutH}, pane {paneW}x{paneH} " +
+                        $"(tiny mismatch #{_voutMismatchStreak})");
         if (_voutMismatchStreak < 2) return;
 
         // One automatic stop+start — exactly the manual workaround that
-        // reliably fixes the tiny picture. Never repeated automatically.
+        // reliably fixes the tiny picture.
         _healRestartUsed = true;
         AppendMirrorLog("stream: vout mis-sized — auto-restarting the player once");
         var player = _streamPlayer;
         Task.Run(async () =>
         {
             try { if (player is { IsPlaying: true }) player.Stop(); } catch { }
-            await Task.Delay(400);
+            await Task.Delay(300);
             _ = Dispatcher.InvokeAsync(() => { if (_streaming) PlayStreamMedia(); });
         });
     }
@@ -1029,11 +1046,57 @@ public partial class MirrorPane : UserControl
 
     // ── Media controls (adb key events — work regardless of window focus) ──
 
-    private async void OnPlayPauseKey(object sender, RoutedEventArgs e) => await SendKeyEvent(85);
+    public bool IsStreaming => _streaming;
+    public bool IsPanelActive => MirrorPanel.Visibility == Visibility.Visible;
+    public bool IsPlaying => _streamPlayer is { State: VLCState.Playing };
+
+    public async void TogglePlayPause() => await SendKeyEvent(85);
+    public void Stop() => OnStopMirror(this, new RoutedEventArgs());
+
+    public async void SeekRelative(long deltaMs)
+    {
+        if (deltaMs < 0)
+        {
+            // Rewind 10s: send MEDIA_REWIND (89) and DPAD_LEFT (21)
+            await SendKeyEvent(89);
+            await SendKeyEvent(21);
+        }
+        else
+        {
+            // Forward 10s: send MEDIA_FAST_FORWARD (90) and DPAD_RIGHT (22)
+            await SendKeyEvent(90);
+            await SendKeyEvent(22);
+        }
+    }
+
+    public void SetVolume(int vol)
+    {
+        if (_streamPlayer != null)
+            _streamPlayer.Volume = vol;
+    }
+
+    private void OnPlayPauseKey(object sender, RoutedEventArgs e) => TogglePlayPause();
+    private void OnBack10Key(object sender, RoutedEventArgs e) => SeekRelative(-10_000);
+    private void OnFwd10Key(object sender, RoutedEventArgs e) => SeekRelative(10_000);
     private async void OnVolDown(object sender, RoutedEventArgs e) => await SendKeyEvent(25);
     private async void OnVolUp(object sender, RoutedEventArgs e) => await SendKeyEvent(24);
     private async void OnBackKey(object sender, RoutedEventArgs e) => await SendKeyEvent(4);
     private async void OnHomeKey(object sender, RoutedEventArgs e) => await SendKeyEvent(3);
+
+    private void OnToggleFullscreen(object sender, RoutedEventArgs e) =>
+        (Window.GetWindow(this) as MainWindow)?.ToggleFullscreen();
+
+    private void OnTogglePlaylist(object sender, RoutedEventArgs e) =>
+        (Window.GetWindow(this) as MainWindow)?.OnTogglePlaylist();
+
+    private void OnStreamGridMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ClickCount == 2)
+        {
+            (Window.GetWindow(this) as MainWindow)?.ToggleFullscreen();
+            e.Handled = true;
+        }
+    }
 
     private sealed record DeviceScreen(int W, int H, int Orientation);
 

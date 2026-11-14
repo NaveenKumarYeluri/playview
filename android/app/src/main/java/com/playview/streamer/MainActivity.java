@@ -22,6 +22,7 @@ public class MainActivity extends Activity {
     private static final int REQUEST_NOTIFICATIONS = 2002;
 
     private TextView status;
+    private android.widget.CheckBox audioCheck;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -62,6 +63,12 @@ public class MainActivity extends Activity {
         stop.setOnClickListener(v ->
                 startService(new Intent(this, StreamService.class).setAction("stop")));
         root.addView(stop);
+
+        audioCheck = new android.widget.CheckBox(this);
+        audioCheck.setText("Stream audio (uncheck for video-only)");
+        audioCheck.setChecked(true);
+        audioCheck.setPadding(0, dp(8), 0, dp(4));
+        root.addView(audioCheck);
 
         status = new TextView(this);
         status.setTextSize(13);
@@ -119,6 +126,7 @@ public class MainActivity extends Activity {
         Intent svc = new Intent(this, StreamService.class);
         svc.putExtra("resultCode", resultCode);
         svc.putExtra("data", data);
+        svc.putExtra("enableAudio", audioCheck == null || audioCheck.isChecked());
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(svc);
         else startService(svc);
         updateStatus();

@@ -9,7 +9,7 @@
       <ColumnDefinition Width="Auto"/>
     </Grid.ColumnDefinitions>
 
-    <lvc:VideoView x:Name="Video">
+    <lvc:VideoView x:Name="Video" MouseLeftButtonDown="OnVideoMouseDown">
       <Border x:Name="HintBorder" HorizontalAlignment="Center" VerticalAlignment="Center"
               Background="#B0101010" CornerRadius="6" Padding="26,20">
         <TextBlock x:Name="Hint" Foreground="#DDDDDD" FontSize="14" TextAlignment="Center"

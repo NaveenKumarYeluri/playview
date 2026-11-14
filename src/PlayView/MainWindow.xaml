@@ -94,6 +94,7 @@
           <ColumnDefinition Width="Auto"/>
           <ColumnDefinition Width="Auto"/>
           <ColumnDefinition Width="Auto"/>
+          <ColumnDefinition Width="Auto"/>
         </Grid.ColumnDefinitions>
 
         <Button x:Name="PlayPauseBtn" Grid.Column="0" Style="{StaticResource TransportButton}"
@@ -117,7 +118,9 @@
         <Slider x:Name="VolumeSlider" Grid.Column="8" Width="90" Minimum="0" Maximum="125"
                 Value="85" VerticalAlignment="Center" ValueChanged="OnVolumeChanged"/>
 
-        <Button Grid.Column="9" Style="{StaticResource TransportButton}" Margin="10,0,0,0"
+        <Button Grid.Column="9" Style="{StaticResource TransportButton}" Margin="6,0,0,0"
+                Content="📋" FontFamily="Segoe UI Symbol" Click="OnTogglePlaylist" ToolTip="Files / Playlist (Ctrl+L)"/>
+        <Button Grid.Column="10" Style="{StaticResource TransportButton}" Margin="6,0,0,0"
                 Content="⛶" FontFamily="Segoe UI Symbol" Click="OnToggleFullscreen" ToolTip="Fullscreen (F)"/>
       </Grid>
     </Border>
