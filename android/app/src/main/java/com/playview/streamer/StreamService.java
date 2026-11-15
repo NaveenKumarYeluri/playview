@@ -638,14 +638,14 @@ public class StreamService extends Service {
                     in.clear();
                     in.put(buf);
 
-                    long pts = System.nanoTime() / 1000;
+                    long pts = android.os.SystemClock.elapsedRealtimeNanos() / 1000;
                     encoder.queueInputBuffer(idx, 0, n, pts, 0);
                 }
                 // End of stream so the drain loop finishes cleanly.
                 int idx = encoder.dequeueInputBuffer(100_000);
                 if (idx >= 0) {
                     encoder.queueInputBuffer(idx, 0, 0,
-                            System.nanoTime() / 1000, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                            android.os.SystemClock.elapsedRealtimeNanos() / 1000, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
                 }
             } catch (Throwable ignored) {
                 // Recording stopped or service shutting down.

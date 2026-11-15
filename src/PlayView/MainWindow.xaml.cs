@@ -31,6 +31,8 @@ public partial class MainWindow : Window
     private double _prevHeight;
     private DispatcherTimer? _fullscreenTimer;
     private bool _sliderDragging;
+    private long _lastSeekTimestamp;
+    private readonly List<IntPtr> _suppressedHudWindows = new();
 
     public MainWindow(AppSettings settings)
     {
@@ -178,8 +180,9 @@ public partial class MainWindow : Window
         if (_activeId == "mirror")
         {
             bool isPlaying = MirrorView.IsPlaying;
-            PlayBtn.Foreground = isPlaying ? accentBrush : textBrush;
-            PauseBtn.Foreground = !isPlaying ? accentBrush : textBrush;
+            PlayPauseBtn.Content = isPlaying ? "⏸" : "▶";
+            PlayPauseBtn.ToolTip = isPlaying ? "Pause (Space)" : "Play (Space)";
+            PlayPauseBtn.Foreground = isPlaying ? accentBrush : textBrush;
             TimeText.Text = MirrorView.IsStreaming ? "LIVE" : "READY";
             StatusLabel.Text = MirrorView.StreamStatusText;
             ProgressSlider.IsEnabled = false;
@@ -194,10 +197,16 @@ public partial class MainWindow : Window
         if (mp == null) return;
 
         bool localPlaying = mp.State == VLCState.Playing;
-        PlayBtn.Foreground = localPlaying ? accentBrush : textBrush;
-        PauseBtn.Foreground = !localPlaying ? accentBrush : textBrush;
+        PlayPauseBtn.Content = localPlaying ? "⏸" : "▶";
+        PlayPauseBtn.ToolTip = localPlaying ? "Pause (Space)" : "Play (Space)";
+        PlayPauseBtn.Foreground = localPlaying ? accentBrush : textBrush;
 
         if (_sliderDragging) return;
+
+        // Skip timer overwrite for 600ms after user seeks so the seek completes smoothly without snapping back
+        if (_lastSeekTimestamp > 0 && (Stopwatch.GetTimestamp() - _lastSeekTimestamp) < Stopwatch.Frequency * 0.6)
+            return;
+        _lastSeekTimestamp = 0;
 
         var length = Math.Max(0, mp.Length);
         if (length > 0 && Math.Abs(ProgressSlider.Maximum - length) > 0.5)
@@ -214,13 +223,52 @@ public partial class MainWindow : Window
         return time.TotalHours >= 1 ? time.ToString(@"h\:mm\:ss") : time.ToString(@"mm\:ss");
     }
 
-    private void OnProgressDown(object sender, MouseButtonEventArgs e) => _sliderDragging = true;
+    private void OnProgressDown(object sender, MouseButtonEventArgs e)
+    {
+        _sliderDragging = true;
+        ProgressSlider.CaptureMouse();
+        SeekToMousePosition(e);
+    }
+
+    private void OnProgressMove(object sender, MouseEventArgs e)
+    {
+        if (_sliderDragging && e.LeftButton == MouseButtonState.Pressed)
+        {
+            SeekToMousePosition(e);
+        }
+    }
+
+    private void SeekToMousePosition(MouseEventArgs e)
+    {
+        if (ProgressSlider.ActualWidth <= 0 || ProgressSlider.Maximum <= 0) return;
+        var pos = e.GetPosition(ProgressSlider);
+        double ratio = Math.Clamp(pos.X / ProgressSlider.ActualWidth, 0.0, 1.0);
+        ProgressSlider.Value = ratio * ProgressSlider.Maximum;
+        TimeText.Text = $"{FormatTime((long)ProgressSlider.Value)} / {FormatTime((long)ProgressSlider.Maximum)}";
+    }
 
     private void OnProgressUp(object sender, MouseButtonEventArgs e)
     {
-        _sliderDragging = false;
-        if (PlayerView.Player is { } mp && mp.Media != null)
-            mp.Time = (long)ProgressSlider.Value;
+        if (_sliderDragging)
+        {
+            _sliderDragging = false;
+            ProgressSlider.ReleaseMouseCapture();
+            if (PlayerView.Player is { } mp && mp.Media != null)
+            {
+                mp.Time = (long)ProgressSlider.Value;
+                _lastSeekTimestamp = Stopwatch.GetTimestamp();
+            }
+        }
+    }
+
+    private void OnProgressMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (_activeId == "local")
+        {
+            int deltaSec = e.Delta > 0 ? 5 : -5;
+            PlayerView.SeekRelative(deltaSec * 1000);
+            e.Handled = true;
+        }
     }
 
     private int _savedVolume = 85;
@@ -228,14 +276,16 @@ public partial class MainWindow : Window
     {
         if (VolumeSlider.Value > 0)
         {
-            _savedVolume = (int)VolumeSlider.Value;
+            _savedVolume = (int)Math.Round(VolumeSlider.Value);
             VolumeSlider.Value = 0;
             MuteBtn.Content = "🔇";
+            MuteBtn.ToolTip = "Unmute (M)";
         }
         else
         {
             VolumeSlider.Value = _savedVolume > 0 ? _savedVolume : 85;
             MuteBtn.Content = "🔊";
+            MuteBtn.ToolTip = "Mute (M)";
         }
     }
 
@@ -246,25 +296,29 @@ public partial class MainWindow : Window
 
     private void OnVolumeChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
+        int vol = (int)Math.Round(VolumeSlider.Value);
         if (PlayerView?.Player != null)
-            PlayerView.Player.Volume = (int)VolumeSlider.Value;
-        if (MirrorView != null)
-            MirrorView.SetVolume((int)VolumeSlider.Value);
+            PlayerView.Player.Volume = vol;
+        if (_activeId == "mirror" && MirrorView != null)
+            MirrorView.SetVolume(vol);
         if (MuteBtn != null)
-            MuteBtn.Content = VolumeSlider.Value == 0 ? "🔇" : "🔊";
+        {
+            MuteBtn.Content = vol == 0 ? "🔇" : "🔊";
+            MuteBtn.ToolTip = vol == 0 ? "Unmute (M)" : "Mute (M)";
+        }
+        if (VolumeSlider != null)
+            VolumeSlider.ToolTip = $"Volume ({vol}%)";
     }
 
-    private void OnPlay(object sender, RoutedEventArgs e)
+    private void OnVolumeMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        if (_activeId == "mirror") MirrorView.Play();
-        else PlayerView.Play();
+        double step = e.Delta > 0 ? 5 : -5;
+        VolumeSlider.Value = Math.Clamp(VolumeSlider.Value + step, VolumeSlider.Minimum, VolumeSlider.Maximum);
+        e.Handled = true;
     }
 
-    private void OnPause(object sender, RoutedEventArgs e)
-    {
-        if (_activeId == "mirror") MirrorView.Pause();
-        else PlayerView.Pause();
-    }
+    private void OnPlay(object sender, RoutedEventArgs e) => OnPlayPause(sender, e);
+    private void OnPause(object sender, RoutedEventArgs e) => OnPlayPause(sender, e);
 
     private void OnPlayPause(object sender, RoutedEventArgs e)
     {
@@ -447,12 +501,14 @@ public partial class MainWindow : Window
                 mi.rcMonitor.Bottom - mi.rcMonitor.Top,
                 Native.SWP_SHOWWINDOW | Native.SWP_FRAMECHANGED);
 
+            SuppressNetworkMonitor();
             StartFullscreenAutoHide();
         }
         else
         {
             _fullscreen = false;
             StopFullscreenAutoHide();
+            RestoreNetworkMonitor();
 
             // 1. Restore style and window state
             Topmost = false;
@@ -531,6 +587,13 @@ public partial class MainWindow : Window
             }
 
             _mouseIdleTicks++;
+            if (_mouseIdleTicks % 5 == 0)
+            {
+                SuppressNetworkMonitor();
+                var curHwnd = new WindowInteropHelper(this).Handle;
+                Native.SetWindowPos(curHwnd, Native.HWND_TOPMOST, 0, 0, 0, 0,
+                    Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+            }
             // 25 ticks of 100ms = 2.5s of stillness
             if (_mouseIdleTicks >= 25 && !_sliderDragging)
             {
@@ -539,6 +602,64 @@ public partial class MainWindow : Window
             }
         };
         _fullscreenTimer.Start();
+    }
+
+    private void SuppressNetworkMonitor()
+    {
+        try
+        {
+            Native.EnumWindows((h, _) =>
+            {
+                Native.GetWindowThreadProcessId(h, out uint pid);
+                string? procName = null;
+                try { procName = Process.GetProcessById((int)pid).ProcessName; } catch { }
+
+                var sbTitle = new System.Text.StringBuilder(256);
+                Native.GetWindowTextW(h, sbTitle, 256);
+                string title = sbTitle.ToString();
+
+                var sbClass = new System.Text.StringBuilder(256);
+                Native.GetClassNameW(h, sbClass, 256);
+                string cls = sbClass.ToString();
+
+                bool isNetMon = (procName != null && procName.Contains("NetworkMonitor", StringComparison.OrdinalIgnoreCase))
+                                || title == "HUD"
+                                || (cls.Contains("WinUI") && title.Contains("Network", StringComparison.OrdinalIgnoreCase));
+
+                if (isNetMon)
+                {
+                    if (!_suppressedHudWindows.Contains(h))
+                        _suppressedHudWindows.Add(h);
+
+                    int ex = Native.GetWindowLong(h, Native.GWL_EXSTYLE);
+                    Native.SetWindowLong(h, Native.GWL_EXSTYLE, ex | Native.WS_EX_LAYERED);
+                    Native.SetLayeredWindowAttributes(h, 0, 0, Native.LWA_ALPHA);
+                    Native.ShowWindow(h, Native.SW_HIDE);
+                    Native.SetWindowPos(h, Native.HWND_NOTOPMOST, -10000, -10000, 0, 0,
+                        Native.SWP_NOSIZE | Native.SWP_NOACTIVATE);
+                }
+                return true;
+            }, IntPtr.Zero);
+        }
+        catch { }
+    }
+
+    private void RestoreNetworkMonitor()
+    {
+        try
+        {
+            foreach (var h in _suppressedHudWindows)
+            {
+                try
+                {
+                    Native.SetLayeredWindowAttributes(h, 0, 255, Native.LWA_ALPHA);
+                    Native.ShowWindow(h, Native.SW_SHOWNOACTIVATE);
+                }
+                catch { }
+            }
+            _suppressedHudWindows.Clear();
+        }
+        catch { }
     }
 
     private void StopFullscreenAutoHide()

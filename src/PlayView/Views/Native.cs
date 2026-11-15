@@ -21,6 +21,10 @@ internal static class Native
     public const int SW_HIDE = 0;
     public const int SW_SHOW = 5;
     public const int SW_SHOWNA = 8;
+    public const int SW_SHOWNOACTIVATE = 4;
+
+    public const int WS_EX_LAYERED = 0x00080000;
+    public const uint LWA_ALPHA = 0x00000002;
 
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;
@@ -31,6 +35,29 @@ internal static class Native
 
     public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
     public static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetLayeredWindowAttributes(IntPtr hwnd, uint crKey, byte bAlpha, uint dwFlags);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLong")]
+    public static extern int GetWindowLong32(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
+    public static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);
+
+    public static int GetWindowLong(IntPtr hWnd, int nIndex) => GetWindowLong32(hWnd, nIndex);
+    public static int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong) => SetWindowLong32(hWnd, nIndex, dwNewLong);
+
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowTextW(IntPtr hWnd, System.Text.StringBuilder text, int count);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
     [DllImport("user32.dll")]
     public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,

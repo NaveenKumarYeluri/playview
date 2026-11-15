@@ -276,15 +276,17 @@
   <!-- Slider (horizontal): dark track + VLC orange thumb -->
   <Style TargetType="Slider">
     <Setter Property="Focusable" Value="False"/>
+    <Setter Property="IsMoveToPointEnabled" Value="True"/>
+    <Setter Property="Cursor" Value="Hand"/>
     <Setter Property="Template">
       <Setter.Value>
         <ControlTemplate TargetType="Slider">
-          <Grid Background="Transparent" MinHeight="18">
+          <Grid Background="Transparent" MinHeight="20">
             <Grid.RowDefinitions>
               <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
             <Border x:Name="TrackBackground" Height="4" CornerRadius="2"
-                    Background="#3A3A3A" VerticalAlignment="Center"/>
+                    Background="#3A3A3A" VerticalAlignment="Center" IsHitTestVisible="False"/>
             <Track x:Name="PART_Track" VerticalAlignment="Center">
               <Track.DecreaseRepeatButton>
                 <RepeatButton Command="Slider.DecreaseLarge" Focusable="False" Opacity="0" Background="Transparent"/>
@@ -293,7 +295,7 @@
                 <RepeatButton Command="Slider.IncreaseLarge" Focusable="False" Opacity="0" Background="Transparent"/>
               </Track.IncreaseRepeatButton>
               <Track.Thumb>
-                <Thumb Width="12" Height="12" Focusable="False">
+                <Thumb Width="14" Height="14" Focusable="False" Cursor="Hand">
                   <Thumb.Template>
                     <ControlTemplate TargetType="Thumb">
                       <Ellipse Fill="{StaticResource Brush.Accent}" Stroke="#202020" StrokeThickness="1"/>

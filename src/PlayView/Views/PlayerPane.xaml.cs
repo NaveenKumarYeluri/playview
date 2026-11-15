@@ -11,6 +11,7 @@ public partial class PlayerPane : UserControl
     private readonly LibVLC _libVlc;
     private readonly ObservableCollection<string> _playlist = new();
     private int _index = -1;
+    private Media? _currentMedia;
 
     public MediaPlayer Player { get; }
 
@@ -18,14 +19,22 @@ public partial class PlayerPane : UserControl
     {
         InitializeComponent();
 
-        _libVlc = new LibVLC("--no-video-title-show");
+        _libVlc = new LibVLC(
+            "--no-video-title-show",
+            "--avcodec-hw=any",
+            "--directx-hw-yuv");
         Player = new MediaPlayer(_libVlc) { Volume = 85 };
         Video.MediaPlayer = Player;
 
         PlaylistList.ItemsSource = _playlist;
 
         Player.EndReached += (_, _) => Dispatcher.InvokeAsync(PlayNext);
-        Player.Playing += (_, _) => Dispatcher.InvokeAsync(HideHint);
+        Player.Playing += (_, _) => Dispatcher.InvokeAsync(() =>
+        {
+            HideHint();
+            if (Window.GetWindow(this) is MainWindow mw)
+                Player.Volume = (int)Math.Round(mw.VolumeSlider.Value);
+        });
         Player.Stopped += (_, _) => Dispatcher.InvokeAsync(ShowHint);
         Player.EncounteredError += (_, _) => Dispatcher.InvokeAsync(ShowHint);
     }
@@ -48,12 +57,37 @@ public partial class PlayerPane : UserControl
         if (_index < 0 || _index >= _playlist.Count) return;
 
         var path = _playlist[_index];
-        using var media = new Media(_libVlc, new Uri(path));
-        Player.Play(media);
+        if (!File.Exists(path)) return;
 
-        HintBorder.Visibility = Visibility.Collapsed;
-        PlaylistList.SelectedItem = path;
-        PlaylistList.ScrollIntoView(path);
+        try
+        {
+            try { _currentMedia?.Dispose(); } catch { }
+            _currentMedia = null;
+
+            if (Uri.TryCreate(path, UriKind.Absolute, out var uri) &&
+                (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == "rtsp" || uri.Scheme == "rtp"))
+            {
+                _currentMedia = new Media(_libVlc, uri);
+            }
+            else
+            {
+                // Native file path avoids URI percent-encoding bugs with spaces, unicode and special characters
+                _currentMedia = new Media(_libVlc, path, FromType.FromPath);
+            }
+
+            if (Window.GetWindow(this) is MainWindow mw)
+                Player.Volume = (int)Math.Round(mw.VolumeSlider.Value);
+
+            Player.Play(_currentMedia);
+
+            HintBorder.Visibility = Visibility.Collapsed;
+            PlaylistList.SelectedItem = path;
+            PlaylistList.ScrollIntoView(path);
+        }
+        catch
+        {
+            ShowHint();
+        }
     }
 
     private void PlayNext()
@@ -108,6 +142,7 @@ public partial class PlayerPane : UserControl
     public void Stop()
     {
         Player.Stop();
+        ShowHint();
     }
 
     public void SeekRelative(long deltaMs)
@@ -157,6 +192,8 @@ public partial class PlayerPane : UserControl
 
     public void Shutdown()
     {
+        try { Player.Stop(); } catch { }
+        try { _currentMedia?.Dispose(); } catch { }
         Player.Dispose();
         _libVlc.Dispose();
     }

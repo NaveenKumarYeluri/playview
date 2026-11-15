@@ -97,8 +97,11 @@
 
           <Slider x:Name="ProgressSlider" Grid.Column="0" Minimum="0" Maximum="1"
                   VerticalAlignment="Center" Margin="0,0,10,0"
+                  IsMoveToPointEnabled="True"
                   PreviewMouseLeftButtonDown="OnProgressDown"
-                  PreviewMouseLeftButtonUp="OnProgressUp"/>
+                  PreviewMouseMove="OnProgressMove"
+                  PreviewMouseLeftButtonUp="OnProgressUp"
+                  PreviewMouseWheel="OnProgressMouseWheel"/>
 
           <TextBlock x:Name="TimeText" Grid.Column="1" Text="00:00 / 00:00"
                      VerticalAlignment="Center" Foreground="{StaticResource Brush.SubText}" FontSize="12" FontFamily="Consolas, Segoe UI"/>
@@ -112,12 +115,10 @@
             <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
 
-          <!-- Left: Play, Pause, Stop, Prev/Next, and Phone Remote buttons -->
+          <!-- Left: Play/Pause, Stop, Prev/Next, and Phone Remote buttons -->
           <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-            <Button x:Name="PlayBtn" Style="{StaticResource TransportButton}"
-                    Content="▶" FontFamily="Segoe UI Symbol" Click="OnPlay" ToolTip="Play (Space)"/>
-            <Button x:Name="PauseBtn" Style="{StaticResource TransportButton}" Margin="4,0,0,0"
-                    Content="⏸" FontFamily="Segoe UI Symbol" Click="OnPause" ToolTip="Pause (Space)"/>
+            <Button x:Name="PlayPauseBtn" Style="{StaticResource TransportButton}"
+                    Content="▶" FontFamily="Segoe UI Symbol" Click="OnPlayPause" ToolTip="Play / Pause (Space)"/>
             <Button x:Name="StopBtn" Style="{StaticResource TransportButton}" Margin="4,0,0,0"
                     Content="⏹" FontFamily="Segoe UI Symbol" Click="OnStop" ToolTip="Stop"/>
             <Button Style="{StaticResource TransportButton}" Margin="4,0,0,0"
@@ -148,7 +149,8 @@
             <Button x:Name="MuteBtn" Style="{StaticResource TransportButton}" Margin="0,0,4,0"
                     Content="🔊" FontSize="13" Click="OnToggleMute" ToolTip="Mute / Unmute (M)"/>
             <Slider x:Name="VolumeSlider" Width="95" Minimum="0" Maximum="125"
-                    Value="85" VerticalAlignment="Center" ValueChanged="OnVolumeChanged" ToolTip="Volume (85%)"/>
+                    Value="85" VerticalAlignment="Center" IsMoveToPointEnabled="True"
+                    ValueChanged="OnVolumeChanged" PreviewMouseWheel="OnVolumeMouseWheel" ToolTip="Volume (85%)"/>
             <Button Style="{StaticResource TransportButton}" Margin="8,0,0,0"
                     Content="📋" FontFamily="Segoe UI Symbol" Click="OnTogglePlaylist" ToolTip="Files / Playlist (Ctrl+L)"/>
             <Button Style="{StaticResource TransportButton}" Margin="4,0,0,0"

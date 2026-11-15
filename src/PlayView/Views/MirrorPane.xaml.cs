@@ -24,6 +24,7 @@ public partial class MirrorPane : UserControl
 
     private Process? _scrcpyProcess;
     private IntPtr _scrcpyHwnd;
+    private CancellationTokenSource? _adbVolCts;
     private DispatcherTimer? _livenessTimer;
     private DispatcherTimer? _sizeTimer;
     private int _lastAppliedW;
@@ -325,17 +326,11 @@ public partial class MirrorPane : UserControl
     /// into mirror.log — decoder/display problems are named there.</summary>
     private LibVLC CreateStreamLibVlc()
     {
-        // Force DirectSound audio output — VLC's default auto-detection can
-        // fail silently when the video renders into a custom HwndHost child
-        // window (our PlayViewMirrorHost), leaving the stream with picture
-        // but no sound.
-        // Disable late frame dropping and frame skipping so clock drift never stalls the live stream.
+        // DirectSound audio output: keeps stream sound reliable without cracking or dropped samples.
         var lib = new LibVLC(
             "--no-video-title-show",
             "--verbose=2",
-            "--aout=directsound",
-            "--no-drop-late-frames",
-            "--no-skip-frames");
+            "--aout=directsound");
         lib.Log += (_, e) =>
         {
             if (e.Level >= LogLevel.Notice)
@@ -413,14 +408,13 @@ public partial class MirrorPane : UserControl
         // second by the liveness watch below.
         try { _streamMedia?.Dispose(); } catch { }
         _streamMedia = new Media(_streamLibVlc!, new Uri(_streamUrl!));
-        // Balanced low-latency caching: 400 ms on USB, 600 ms on Wi-Fi.
-        // Absorbs encoder bursts and USB transmission jitter without stuttering,
-        // and keeps video tightly synced with Bluetooth audio.
+        // Responsive low-latency caching: 250 ms on USB, 450 ms on Wi-Fi.
+        // Absorbs transmission jitter while keeping video tightly synced with audio.
         var isUsb = _streamUrl?.Contains("127.0.0.1") == true;
-        int caching = isUsb ? 400 : 600;
+        int caching = isUsb ? 250 : 450;
         _streamMedia.AddOption($":network-caching={caching}");
         _streamMedia.AddOption($":live-caching={caching}");
-        _streamMedia.AddOption(":clock-jitter=500");
+        _streamMedia.AddOption(":clock-jitter=100");
         _lastDemuxBytes = 0;
         _stallTicks = 0;
         _streamPlayer!.Play(_streamMedia);
@@ -976,17 +970,22 @@ public partial class MirrorPane : UserControl
         if (_streamPlayer != null)
             _streamPlayer.Volume = vol;
 
-        if (_adb != null)
+        if (_adb != null && (_streaming || _embedded || _scrcpyProcess != null))
         {
+            _adbVolCts?.Cancel();
+            _adbVolCts = new CancellationTokenSource();
+            var token = _adbVolCts.Token;
             int adbVol = Math.Clamp((int)Math.Round(vol * 15.0 / 100.0), 0, 15);
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    await ScrcpyService.RunAdbAsync(_adb, $"shell media volume --stream 3 --set {adbVol}");
+                    await Task.Delay(120, token);
+                    if (!token.IsCancellationRequested)
+                        await ScrcpyService.RunAdbAsync(_adb, $"shell media volume --stream 3 --set {adbVol}");
                 }
                 catch { }
-            });
+            }, token);
         }
     }
 
